@@ -1,0 +1,8 @@
+requires_core: ^2.0.0
+dependencies:
+  - artifactId: integration-httpserver
+    groupId: com.ecat
+    version: ^2.0.0
+  - artifactId: integration-ecat-core-api
+    groupId: com.ecat
+    version: ^2.0.0
