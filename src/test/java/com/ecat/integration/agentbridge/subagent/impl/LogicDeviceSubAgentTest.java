@@ -1,7 +1,6 @@
 package com.ecat.integration.agentbridge.subagent.impl;
 
 import com.ecat.integration.agentbridge.subagent.ArgDescriptor;
-import com.ecat.integration.agentbridge.subagent.SafetyLevel;
 import com.ecat.integration.agentbridge.subagent.ToolDescriptor;
 import org.junit.Test;
 
@@ -39,7 +38,6 @@ public class LogicDeviceSubAgentTest {
         assertEquals("PUT", setAttr.getHttpMethod());
         assertEquals("/core-api/logic-devices/{id}/attributes/{attrId}/value", setAttr.getHttpPath());
         assertTrue("set-attribute 应为异步", setAttr.isAsync());
-        assertEquals(SafetyLevel.MODERATE, setAttr.getSafetyLevel());
         assertTrue("id 应为路径参数", findArg(setAttr, "id").isPathParam());
         assertTrue("attrId 应为路径参数", findArg(setAttr, "attrId").isPathParam());
         assertEquals("--attr-id", findArg(setAttr, "attrId").getFlag());

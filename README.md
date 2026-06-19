@@ -1,66 +1,47 @@
 # integration-agent-bridge
 
-ECAT Agent Bridge — MCP Server 集成模块，让外部 AI Agent 通过 MCP 协议（Model Context Protocol）与 ECAT 平台交互。
+ECAT Agent Bridge — MCP（Model Context Protocol）Server 集成模块。把 ECAT 平台的设备、逻辑设备、媒体、事件能力以 MCP 工具的形式暴露给外部 AI Agent，让 Agent 不必懂 ECAT 的 HTTP API 就能操作平台。
 
-## 概述
+## 谁会用 / 接什么 Agent
 
-Agent Bridge 作为 ECAT 与 AI Agent 之间的桥梁，将 ECAT 平台的设备管理、数据采集、告警处理等能力以 MCP 工具（Tools）、资源（Resources）、提示词（Prompts）的形式暴露给外部 Agent。
+任何 MCP 兼容客户端都可接入：
 
-**支持的 Agent 框架**：Claude Code、ChatGPT、Cursor、Windsurf 等所有支持 MCP 协议的客户端。
+| Agent | 接入方式 |
+|-------|---------|
+| **Claude Code** | 项目根 `.mcp.json` 配置（见下） |
+| **Cursor / Windsurf** | 各自 MCP server 配置，填同一 endpoint + Bearer 头 |
+| **ChatGPT** 及其他 MCP 客户端 | Streamable HTTP endpoint + Bearer 头 |
+| 自研 Agent | 直接按 JSON-RPC 2.0 over HTTP 调用（见裸 curl 示例） |
 
-**传输协议**：MCP Streamable HTTP（JSON-RPC 2.0 over HTTP POST + SSE）。
+传输协议：MCP Streamable HTTP（JSON-RPC 2.0 over `POST /mcp`），会话关闭走 `DELETE /mcp`。
 
-## 功能特性
+## Agent 能拿到什么（2 个元工具 + 4 个领域能力）
 
-### MCP 协议支持
+接入后 Agent 只看到 2 个 MCP 工具——**自发现、自执行**：
 
-| 功能 | MCP 方法 | 说明 |
-|------|---------|------|
-| 握手初始化 | `initialize` | 协议版本协商、能力声明 |
-| 工具发现 | `tools/list` | 列出当前可用工具 |
-| 工具调用 | `tools/call` | 执行指定工具 |
-| 资源列表 | `resources/list` | 列出只读资源 |
-| 资源读取 | `resources/read` | 读取指定资源内容 |
-| 提示词列表 | `prompts/list` | 列出可用提示词模板 |
-| 提示词获取 | `prompts/get` | 获取填充后的提示词 |
-| SSE 事件推送 | GET `/mcp` | 实时事件通知流 |
-| 会话管理 | DELETE `/mcp` | 关闭 MCP 会话 |
+| 元工具 | 作用 |
+|--------|------|
+| `getTools` | 取工具的参数/示例。**description 即能力菜单**：`tools/list` 阶段就能读到「领域 Agents: agent: [tools]」清单（无需调用即可看到）；再调 `getTools("<agent>")` 取该领域每个工具的详细参数与示例。先 `getTools` 再 `useTools`。 |
+| `useTools` | 执行工具。传一条 CLI 命令（如 `device list`）→ 自动路由、解析参数、调用 ECAT → 返回结果。`set-attribute` 是异步操作，返回 taskId，用 `event query-async-result --id <taskId>` 查结果。 |
 
-### 6 个内置工具
+Agent 无需预先记住工具清单：`tools/list` 时 `getTools` 的 description 已列出全部领域与各自工具，`getTools("<agent>")` 取参数，`useTools` 执行。
 
-始终可见，无需加载能力组：
+4 个领域能力（按需启用，未启用的领域不出现在索引里）：
 
-| 工具名 | 说明 | 安全级别 |
-|--------|------|---------|
-| `ecat_search_capabilities` | 按关键词搜索能力组 | SAFE |
-| `ecat_load_capabilities` | 加载能力组工具到当前会话 | SAFE |
-| `ecat_subscribe_events` | 订阅设备状态变更等实时事件 | SAFE |
-| `query_async_result` | 查询异步操作执行状态和结果 | SAFE |
-| `confirm_operation` | 确认高风险操作（需操作确认码） | HIGH_RISK |
-| `query_audit_log` | 查询 Agent 操作审计日志 | SAFE |
+| 领域 | agent 名 | 工具 | 能做什么 |
+|------|----------|------|----------|
+| 物理设备 | `device` | `list` / `get` / `get-attributes` / `get-attribute-schemas` / `set-attribute` | 查设备、读属性、改属性（`set-attribute` 异步，返回 taskId） |
+| 逻辑设备 | `logic-device` | `list` / `get-attributes` / `set-attribute` | 聚合/派生设备的查询与属性读写 |
+| 媒体 | `media` | `snapshot` / `stream` / `stop-stream` / `stream-info` / `record` / `record-info` / `get-download-url` | 摄像头拍照/直播/录像；`get-download-url` 把媒体 URI 转成**无需 token**、5 分钟有效的下载 URL |
+| 事件 | `event` | `query-async-result` | 查异步操作结果（`set-attribute` 等返回的 taskId） |
 
-### 4 个内置资源
+> 媒体能力需额外启用 `integration-media-api`（独立端口 9931）；其余领域依赖 `integration-ecat-core-api`（通常默认启用）。
 
-| URI | 说明 |
-|-----|------|
-| `ecat://system/info` | 系统版本、运行时间、集成/设备数量 |
-| `ecat://devices/overview` | 设备数量及状态统计 |
-| `ecat://capabilities/loaded` | 当前已加载的 MCP 能力组 |
-| `ecat://audit/recent` | 最近 20 条 Agent 操作审计记录 |
-
-### 3 个提示词模板
-
-| 名称 | 说明 | 参数 |
-|------|------|------|
-| `ecat_system_overview` | ECAT 系统概述 | `language` |
-| `ecat_device_guide` | 设备操作指南 | `device_type`, `operation` |
-| `ecat_safety_guide` | 安全操作规范 | 无 |
-
-## 快速开始
+## 配置与接入
 
 ### 1. 启用集成
 
-在 `.ecat-data/core/integrations.yml` 中添加：
+`.ecat-data/core/integrations.yml`：
 
 ```yaml
 com.ecat:integration-agent-bridge:
@@ -72,59 +53,40 @@ com.ecat:integration-agent-bridge:
 
 ### 2. 生成 Agent Token
 
-通过 ConfigFlow 向导生成：
+通过 ConfigFlow 两步向导生成（先用管理员账号登录拿 AUTH_TOKEN）：
 
 ```bash
-# 1. 登录获取管理 Token
+# 1. 登录拿管理 Token
 AUTH_TOKEN=$(curl -s -X POST http://localhost:9999/core-api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin@123"}' | jq -r '.data.token')
 
 # 2. 启动 ConfigFlow
 FLOW_ID=$(curl -s -X POST http://localhost:9999/core-api/config-flows/start \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $AUTH_TOKEN" \
   -d '{"providerCoordinate":"com.ecat:integration-agent-bridge"}' | jq -r '.data.flowId')
 
-# 3. 提交 Token 配置（生成 Token）
+# 3. token_setup：填 name / role（生成 Token）
 curl -s -X POST http://localhost:9999/core-api/config-flows/step \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $AUTH_TOKEN" \
   -d "{\"flowId\":\"$FLOW_ID\",\"stepId\":\"token_setup\",\"userInput\":{\"name\":\"my-agent\",\"role\":\"admin\"}}"
 
-# 4. 确认（从上一步响应的 schema.fields 中提取生成的 Token，然后确认）
+# 4. final_confirm：确认 → 响应 data.rawToken 即生成的 Agent Token（妥善保存）
 curl -s -X POST http://localhost:9999/core-api/config-flows/step \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $AUTH_TOKEN" \
   -d "{\"flowId\":\"$FLOW_ID\",\"stepId\":\"final_confirm\",\"userInput\":{\"confirmed\":true}}"
 ```
 
-### 3. MCP 客户端连接
+**Token 要点**：
+- 格式 `ecat-agent-<32位hex>`，**永不过期**，core 重启后仍有效（落盘的是 SHA-256 hash，不可逆，不存明文）。
+- 原始 Token 仅在生成时回显一次（`final_confirm` 响应的 `data.rawToken`），丢失需重新生成。
+- 认证：`Authorization: Bearer <token>` 请求头；无 header 能力的客户端可用 `?token=<token>` 查询参数回退。
 
-**Endpoint**: `http://localhost:9999/mcp`
+### 3. 接入你的 MCP 客户端
 
-**认证方式**: Bearer Token（Header 或 Query Parameter）
+**Endpoint**：`http://<core-host>:9999/mcp`　**认证**：`Authorization: Bearer <token>`
 
-```bash
-# MCP Initialize
-curl -X POST http://localhost:9999/mcp \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ecat-agent-xxxx" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "initialize",
-    "id": 1,
-    "params": {
-      "protocolVersion": "2025-03-26",
-      "capabilities": {},
-      "clientInfo": {"name": "my-agent", "version": "1.0"}
-    }
-  }'
-```
-
-### 4. Claude Code 配置示例
-
-在项目的 `.mcp.json` 中添加：
+通用配置（MCP Streamable HTTP，`url` + `headers` 形态）：
 
 ```json
 {
@@ -139,136 +101,69 @@ curl -X POST http://localhost:9999/mcp \
 }
 ```
 
-## 架构
+- **Claude Code**：把上面这段写进项目根的 `.mcp.json`。
+- **Cursor / Windsurf / ChatGPT** 等：在各自 MCP server 配置处填同一 endpoint URL 与 `Authorization` 头（各客户端配置入口不同，填法一致）。
+- **裸验证（自研 Agent / 排障）**：
 
-### 模块依赖
-
-```
-integration-agent-bridge
-  ├── integration-httpserver (必需) — HTTP 服务器、路由注册
-  └── integration-ecat-core-api (必需) — API 路由元数据、内部 Token
-```
-
-### 代码结构
-
-```
-com.ecat.integration.agentbridge/
-├── AgentBridgeIntegration.java    # 主集成类，生命周期管理 + MCP 请求分发
-├── mcp/                           # MCP 协议层
-│   ├── McpServer.java             # Streamable HTTP 传输（POST/GET/DELETE /mcp）
-│   ├── McpSession.java            # 会话状态（agentId、已加载能力组、订阅事件）
-│   ├── McpRequestHandler.java     # 请求分发接口
-│   ├── McpAuthenticator.java      # 认证接口
-│   ├── JsonRpcRequest.java        # JSON-RPC 2.0 请求模型
-│   ├── JsonRpcResponse.java       # JSON-RPC 2.0 响应模型
-│   ├── JsonRpcNotification.java   # JSON-RPC 通知模型
-│   └── McpException.java         # MCP 异常（含错误码）
-├── auth/                          # 认证与安全
-│   ├── AgentAuthManager.java      # Token 生成/验证（SHA-256 哈希存储）
-│   ├── AgentToken.java            # Token 数据（token、identity、过期时间）
-│   ├── AgentIdentity.java         # Agent 身份（ID、名称、角色、权限）
-│   ├── ConfirmationManager.java   # 高风险操作确认管理（300s 超时）
-│   ├── AuthException.java         # 认证异常
-│   └── AuditLoggerBridge.java     # 审计日志接口（解耦 auth 与 audit）
-├── capability/                    # 能力发现与加载
-│   ├── CapabilityManager.java     # 扫描 RouteDescriptor 构建工具索引
-│   ├── CapabilityGroupSummary.java # 能力组摘要 DTO
-│   └── LoadResult.java            # 加载结果 DTO
-├── tool/                          # 工具定义与执行
-│   ├── McpTool.java               # MCP 工具定义（name、schema、annotations）
-│   ├── ToolGenerator.java         # RouteDescriptor → McpTool 转换
-│   ├── ToolExecutor.java          # HTTP 自调用执行 API 路由工具
-│   └── ToolResult.java            # 执行结果（content、isError、asyncId）
-├── event/                         # 事件管理
-│   ├── EventManager.java          # Bus 事件订阅 → MCP 通知转发
-│   └── UnifiedEvent.java          # 统一事件模型
-├── resource/                      # MCP Resources
-│   └── ResourceManager.java       # 4 个只读资源
-├── audit/                         # 审计日志
-│   ├── AuditLogger.java           # 日志写入/查询（按日期分割文件）
-│   └── AuditRecord.java           # 审计记录 DTO
-├── prompt/                        # MCP Prompts
-│   ├── PromptManager.java         # 提示词管理（3 个内置模板）
-│   └── PromptTemplate.java        # 模板引擎（{argName} 占位符替换）
-└── config/                        # ConfigFlow 配置向导
-    └── AgentBridgeConfigFlow.java # 2 步向导：token_setup → final_confirm
+```bash
+curl -X POST http://localhost:9999/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ecat-agent-xxxx" \
+  -d '{"jsonrpc":"2.0","method":"initialize","id":1,
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"my-agent","version":"1.0"}}}'
 ```
 
-### 生命周期
+## 用法（Agent 视角）
+
+典型一次会话：
 
 ```
-onLoad()   → 获取 httpserver 依赖、创建 authManager、设置 ConfigFlow 回调
-             ↓
-           registerConfigFlow() — IntegrationManager 调用 getConfigFlow()
-             ↓
-onInit()   → 无操作
-             ↓
-onStart()  → 创建子组件、注册 /mcp 路由、订阅 Bus 事件
-             ↓
-INTEGRATIONS_ALL_LOADED → buildIndex() + obtainInternalToken()
-             ↓
-onPause()  → 停止 MCP 服务和事件订阅
-             ↓
-onRelease()→ 释放所有资源
+连上 → initialize → tools/list                    → [getTools, useTools]
+                      （getTools 的 description 已列出全部领域 + 各自工具清单，无需调用即可看到）
+     → getTools("media")                           → media 各工具的参数与示例
+     → useTools("device list")                     → 设备列表
+     → useTools("device set-attribute --device-id ... --attribute-id ... --value ...")
+                                                   → 返回 taskId（异步）
+     → useTools("event query-async-result --id <taskId>")  → 查执行结果
 ```
 
-### 渐进式能力发现（Progressive Disclosure）
-
-Agent 初次连接只看到 6 个核心工具。通过 `ecat_search_capabilities` 搜索能力组，
-再用 `ecat_load_capabilities` 按需加载。加载后收到 `notifications/tools/list_changed` 通知，
-后续 `tools/list` 返回扩展后的工具列表。
+下载媒体文件（无需把 token 交给下载请求）：
 
 ```
-Agent 连接 → tools/list → 6 个核心工具
-          → ecat_search_capabilities("device") → [device-monitoring, device-config, ...]
-          → ecat_load_capabilities("device-monitoring") → 加载 12 个工具
-          → notifications/tools/list_changed → 通知 Agent 工具列表变更
-          → tools/list → 6 + 12 = 18 个工具
+useTools("media snapshot --device-id cam-01")          → 拿到 ecat-media:// URI
+useTools("media get-download-url --uri <URI>")         → 返回无需 token、5 分钟有效的下载 URL
+直接 GET 该 URL（浏览器 / curl 都行）                     → 拉到 JPEG / MP4
 ```
-
-### Token 安全
-
-- Token 格式：`ecat-agent-<32位随机hex>`
-- 存储方式：SHA-256 哈希，原始 Token 仅在生成时返回一次
-- 有效期：24 小时
-- 认证方式：`Authorization: Bearer <token>` Header 或 `?token=<token>` Query Parameter（SSE 场景）
-- 内部 Token：Agent Bridge 通过 `AuthManager.createInternalSession()` 获取 ecat-core-api 的内部 session Token，用于 HTTP 自调用
 
 ## 构建
 
 ```bash
-# 从项目根目录构建
-mvnd clean install -pl ecat-integrations/integration-agent-bridge -am -DskipTests
-
-# 运行单元测试
-mvnd clean install -pl ecat-integrations/integration-agent-bridge
+mvnd clean install -pl ecat-integrations/agent-bridge -am -DskipTests   # 仅构建
+mvnd clean install -pl ecat-integrations/agent-bridge                  # 构建 + 单元测试（109 例）
 ```
 
-### 单元测试
+> 逐测试类覆盖明细见 `src/test/` 与 `docs/06`。
 
-| 测试类 | 测试数 | 覆盖范围 |
-|--------|-------|---------|
-| `PromptTemplateTest` | 17 | 模板解析、占位符替换、边界情况 |
-| `PromptManagerTest` | 12 | 提示词列表、获取、不存在处理 |
-| `AgentBridgeConfigFlowTest` | 18 | ConfigFlow 2 步向导全流程 |
-| **合计** | **47** | |
+## 设计与文档
 
-## 文档索引
+README 聚焦接入与使用；架构、交互流程、实现细节见 `docs/`：
 
-| 文档 | 说明 |
+| 文档 | 内容 |
 |------|------|
-| [requirements.md](docs/requirements.md) | 需求文档 — 愿景、功能需求、验收标准 |
-| [design-overview.md](docs/design-overview.md) | 架构设计总览 — 技术选型、整体架构、分步实施计划 |
-| [design-httpserver-route-descriptor.md](docs/design-httpserver-route-descriptor.md) | 设计一 — HTTP 基础设施增强（RouteDescriptor、池化改造） |
-| [design-async-operations.md](docs/design-async-operations.md) | 设计二 — 异步操作管理（AsyncExecutionManager） |
-| [design-agent-bridge-mcp-server.md](docs/design-agent-bridge-mcp-server.md) | 设计三 — Agent Bridge MCP Server 详细设计 |
+| [docs/requirements.md](docs/requirements.md) | 需求与验收标准 |
+| [docs/05-bcp-subagent-architecture-design.md](docs/05-bcp-subagent-architecture-design.md) | SubAgent / 工具路由架构设计（当前架构权威） |
+| [docs/06-bcp-implementation-plan.md](docs/06-bcp-implementation-plan.md) | 实现计划与完成情况（当前架构权威） |
+| [docs/03-bcp-bounded-context-packs-reference.md](docs/03-bcp-bounded-context-packs-reference.md) | BCP（Bounded Context Pack）背景 |
+| [docs/04-bcp-interaction-flow-analysis.md](docs/04-bcp-interaction-flow-analysis.md) | BCP 交互流程分析 |
+| [docs/design-async-operations.md](docs/design-async-operations.md) | 异步操作管理（`set-attribute` 返回 taskId 的基础） |
+| [docs/design-agent-bridge-mcp-server.md](docs/design-agent-bridge-mcp-server.md) | MCP 传输层设计（McpServer / McpSession，仍适用） |
 
 ## 已知限制
 
-1. **能力索引依赖 RouteDescriptor**：只有通过新 `registerUrl()` 重载（带 RouteDescriptor）注册的路由才会被能力发现。现有 ecat-core-api 路由使用旧 API 注册，暂不可被发现。
-2. **Token 重启失效**：Agent Token 仅存储在内存中，ECAT 重启后需重新生成。
-3. **Java 8 兼容**：自行实现 MCP 协议，不使用官方 MCP Java SDK（需要 Java 17）。
-4. **SSE 无过滤**：事件推送暂未实现按 session 订阅类型过滤，所有事件广播到所有连接。
+1. **能力按集成启用动态可见**：`media` 领域需启用 `integration-media-api`；未启用的领域不出现在 `getTools` 索引里。
+2. **领域 SubAgent 硬编码装配**：4 个领域在启动时硬编码，新增领域需改代码并 `mvn install`。
+3. **Java 8 兼容**：自行实现 MCP 协议（官方 MCP Java SDK 需 Java 17），不依赖官方 SDK。
 
 ## License
 

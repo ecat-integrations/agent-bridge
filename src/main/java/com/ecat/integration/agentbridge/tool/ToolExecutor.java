@@ -21,7 +21,7 @@ import java.util.Map;
  *
  * <p>执行流程：
  * <ol>
- *   <li>根据 McpTool 中存储的 sourceUrl 和 sourceMethod 构造 HTTP 请求</li>
+ *   <li>根据 {@link ToolDescriptor} 的 httpMethod/httpPath 构造 HTTP 请求</li>
  *   <li>设置内部认证 Token 和异步模式请求头</li>
  *   <li>发送请求到 localhost:9999</li>
  *   <li>解析响应并返回 {@link ToolResult}</li>
@@ -74,36 +74,6 @@ public class ToolExecutor {
             throw new IllegalArgumentException("tokenProvider must not be null");
         }
         this.tokenProvider = tokenProvider;
-    }
-
-    /**
-     * 执行 MCP 工具调用。
-     *
-     * <p>根据 McpTool 中存储的 sourceUrl/sourceMethod 构造 HTTP 请求，
-     * 自调用 ecat-core-api 接口。支持异步模式（HTTP 202）和自动重试。
-     *
-     * @param tool     要执行的工具定义
-     * @param params   工具参数
-     * @param baseUrl  ecat-core-api 基础 URL（如 http://127.0.0.1:9999）
-     * @return 执行结果
-     */
-    public ToolResult execute(McpTool tool, Map<String, Object> params, String baseUrl) {
-        if (tool == null) {
-            throw new IllegalArgumentException("tool must not be null");
-        }
-        if (tool.getSourceUrl() == null || tool.getSourceMethod() == null) {
-            return ToolResult.error("Tool has no source URL/method (built-in tool)");
-        }
-
-        String url = baseUrl + tool.getSourceUrl();
-        String method = tool.getSourceMethod().toUpperCase();
-        // POST/PUT/DELETE 且有参数时序列化为 JSON body
-        String body = null;
-        if (params != null && !params.isEmpty()
-                && ("POST".equals(method) || "PUT".equals(method) || "DELETE".equals(method))) {
-            body = JSON.toJSONString(params);
-        }
-        return executeWithRetry(url, method, body);
     }
 
     /**
@@ -259,25 +229,41 @@ public class ToolExecutor {
     }
 
     /**
-     * 从异步响应中提取 asyncExecutionId。
+     * 从异步接受响应（HTTP 202）中提取 asyncExecutionId。
      *
-     * @param response HTTP 响应体
-     * @return 异步任务 ID，解析失败时返回原始响应
+     * <p>core-api 异步响应契约（{@code ControllerUtils.buildAsyncAcceptedResponse}）：
+     * <pre>{"asyncExecutionId":"async-3","status":"...","estimatedTimeout":30,"createdAt":"..."}</pre>
+     * 字段名为 {@code asyncExecutionId}（非 {@code executionId}）。
+     *
+     * <p>严格模式（CLAUDE.md）：字段缺失/响应非法属契约违反，抛 {@link IllegalStateException}
+     * 明确报错，<b>不</b>静默返回整段响应——否则会生成畸形 taskId，污染下游
+     * {@code event query-async-result} 链路（BUG-1）。
+     *
+     * <p>包级可见以支持单元测试（{@code ToolExecutorTest#extractAsyncIdReadsAsyncExecutionIdField} 等）。
+     *
+     * @param response HTTP 202 响应体
+     * @return 异步任务 ID（如 "async-3"）
+     * @throws IllegalStateException 响应为空 / 非合法 JSON / 缺少 asyncExecutionId / 值为空
      */
-    private String extractAsyncId(String response) {
+    String extractAsyncId(String response) {
         if (response == null || response.isEmpty()) {
-            return "unknown";
+            throw new IllegalStateException("异步接受响应为空，无法提取 asyncExecutionId");
         }
+        com.alibaba.fastjson2.JSONObject json;
         try {
-            com.alibaba.fastjson2.JSONObject json = JSON.parseObject(response);
-            if (json != null && json.containsKey("executionId")) {
-                return json.getString("executionId");
-            }
-            // 如果没有标准字段，返回整个响应作为标识
-            return response;
+            json = JSON.parseObject(response);
         } catch (Exception e) {
-            return response;
+            throw new IllegalStateException("异步接受响应非合法 JSON: " + response, e);
         }
+        if (json == null || !json.containsKey("asyncExecutionId")) {
+            throw new IllegalStateException(
+                    "异步接受响应缺少 asyncExecutionId 字段（契约违反）: " + response);
+        }
+        String id = json.getString("asyncExecutionId");
+        if (id == null || id.isEmpty()) {
+            throw new IllegalStateException("异步接受响应 asyncExecutionId 为空: " + response);
+        }
+        return id;
     }
 
     /**

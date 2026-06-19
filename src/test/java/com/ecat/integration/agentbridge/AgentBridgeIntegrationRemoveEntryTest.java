@@ -9,7 +9,6 @@ import com.ecat.integration.agentbridge.config.AgentBridgeConfigFlow;
 import org.junit.Test;
 
 import java.lang.reflect.Field;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -89,7 +88,7 @@ public class AgentBridgeIntegrationRemoveEntryTest {
         when(core.getEntryRegistry()).thenReturn(registry);
 
         AgentAuthManager authManager = new AgentAuthManager();
-        AgentToken token = authManager.generateToken("test-agent", "admin", Collections.<String>emptySet());
+        AgentToken token = authManager.generateToken("test-agent", "admin");
         String tokenHash = AgentAuthManager.sha256(token.getToken());
         assertNotNull("token 初始应有效", authManager.validateToken(token.getToken()));
 
@@ -115,7 +114,7 @@ public class AgentBridgeIntegrationRemoveEntryTest {
         when(core.getEntryRegistry()).thenReturn(registry);
 
         AgentAuthManager authManager = new AgentAuthManager();
-        AgentToken token = authManager.generateToken("test-agent", "admin", Collections.<String>emptySet());
+        AgentToken token = authManager.generateToken("test-agent", "admin");
 
         Map<String, Object> data = new HashMap<>();
         data.put("tokenHash", AgentAuthManager.sha256(token.getToken()));

@@ -29,10 +29,6 @@ import com.ecat.integration.EcatCoreApiIntegration.EcatCoreApiIntegration;
 import com.ecat.integration.HttpServerIntegration.EasyHttpServer;
 import com.ecat.integration.HttpServerIntegration.HttpServerIntegration;
 import com.ecat.integration.agentbridge.auth.AgentAuthManager;
-import com.ecat.integration.agentbridge.auth.AuditLoggerBridge;
-import com.ecat.integration.agentbridge.auth.ConfirmationManager;
-import com.ecat.integration.agentbridge.audit.AuditLogger;
-import com.ecat.integration.agentbridge.capability.CapabilityManager;
 import com.ecat.integration.agentbridge.subagent.CliParser;
 import com.ecat.integration.agentbridge.subagent.SubAgentRegistry;
 import com.ecat.integration.agentbridge.subagent.ToolDispatcher;
@@ -42,16 +38,14 @@ import com.ecat.integration.agentbridge.subagent.impl.LogicDeviceSubAgent;
 import com.ecat.integration.agentbridge.subagent.impl.MediaSubAgent;
 import com.ecat.integration.agentbridge.subagent.impl.EventSubAgent;
 import com.ecat.integration.agentbridge.config.AgentBridgeConfigFlow;
-import com.ecat.integration.agentbridge.event.EventManager;
 import com.ecat.integration.agentbridge.mcp.McpRequestHandler;
 import com.ecat.integration.agentbridge.mcp.McpServer;
 import com.ecat.integration.agentbridge.mcp.JsonRpcRequest;
 import com.ecat.integration.agentbridge.mcp.JsonRpcResponse;
 import com.ecat.integration.agentbridge.mcp.McpException;
 import com.ecat.integration.agentbridge.mcp.McpSession;
-import com.ecat.integration.agentbridge.prompt.PromptManager;
-import com.ecat.integration.agentbridge.resource.ResourceManager;
 import com.ecat.integration.agentbridge.tool.ToolExecutor;
+import com.ecat.integration.agentbridge.tool.MediaUrlSigner;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -107,9 +101,6 @@ public class AgentBridgeIntegration extends IntegrationBase {
     /** MCP 服务器（HTTP 路由注册 + 会话管理） */
     private McpServer mcpServer;
 
-    /** 能力索引管理器（路由发现 + 工具注册） */
-    private CapabilityManager capabilityManager;
-
     /** 工具执行器（代理 HTTP 请求到 ecat-core-api） */
     private ToolExecutor toolExecutor;
 
@@ -124,21 +115,6 @@ public class AgentBridgeIntegration extends IntegrationBase {
 
     /** 集成生命周期订阅句柄（SubAgent 自发现） */
     private Subscription selfDiscoverySubscription;
-
-    /** 资源管理器（MCP resources 协议） */
-    private ResourceManager resourceManager;
-
-    /** 事件管理器（SSE 推送 + Bus 事件订阅） */
-    private EventManager eventManager;
-
-    /** 确认请求管理器（高风险操作人工确认） */
-    private ConfirmationManager confirmationManager;
-
-    /** 审计日志记录器 */
-    private AuditLogger auditLogger;
-
-    /** 提示词管理器（MCP prompts 协议） */
-    private PromptManager promptManager;
 
     /** INTEGRATIONS_ALL_LOADED 事件订阅 */
     private Subscription integrationsLoadedSubscription;
@@ -173,15 +149,12 @@ public class AgentBridgeIntegration extends IntegrationBase {
         AgentBridgeConfigFlow.setTokenManager(new AgentBridgeConfigFlow.TokenManagerCallback() {
             @Override
             public String generateToken(String name, String role) {
-                Set<String> permissions = new HashSet<String>();
-                permissions.add("tools:read");
-                permissions.add("resources:read");
-                permissions.add("prompts:read");
-                if ("admin".equals(role)) {
-                    permissions.add("tools:write");
-                    permissions.add("tools:dangerous");
-                }
-                return authManager.generateToken(name, role, permissions).getToken();
+                return authManager.generateToken(name, role).getToken();
+            }
+
+            @Override
+            public String hashToken(String rawToken) {
+                return AgentAuthManager.sha256(rawToken);
             }
         });
     }
@@ -203,22 +176,19 @@ public class AgentBridgeIntegration extends IntegrationBase {
      * <p>子组件初始化顺序（按依赖关系排列）：
      * <ol>
      *   <li>获取共享 HTTP 服务器</li>
-     *   <li>创建 AgentAuthManager</li>
-     *   <li>创建 AuditLogger</li>
-     *   <li>创建 ConfirmationManager（注入 AuditLoggerBridge 适配器）</li>
-     *   <li>创建 CapabilityManager</li>
+     *   <li>authManager 已在 onLoad() 中创建</li>
      *   <li>创建 ToolExecutor（注入 InternalTokenProvider 适配器）</li>
-     *   <li>创建 ResourceManager（注入 core, CapabilityManager, AuditLogger）</li>
-     *   <li>创建 PromptManager</li>
+     *   <li>BCP 装配 SubAgent：SubAgentRegistry + CliParser + ToolDispatcher</li>
+     *   <li>订阅 INTEGRATION_LIFECYCLE（SubAgent 自发现）</li>
+     *   <li>创建 McpRequestHandlerImpl（仅注入 ToolDispatcher — BCP 仅暴露 tools 通道，doc 05 §1.4）</li>
      *   <li>创建 McpServer（注入 server, authenticator, endpoint, requestHandler）</li>
-     *   <li>创建 EventManager（注入 busRegistry, mcpServer, capabilityManager）</li>
-     *   <li>注册 EventManager 为 EventController.Listener（统一事件通道）</li>
-     *   <li>注册 ConfigFlow 静态回调</li>
      *   <li>启动 McpServer（注册 /mcp 路由）</li>
-     *   <li>注册 SSE 端点</li>
-     *   <li>订阅 DEVICE_DATA_UPDATE Bus 事件（其余通过 EventController.Listener）</li>
-     *   <li>订阅 INTEGRATIONS_ALL_LOADED 事件</li>
+     *   <li>订阅 INTEGRATIONS_ALL_LOADED 事件（对账 SubAgent 索引 + 获取内部 token）</li>
      * </ol>
+     *
+     * <p>BCP 架构砍掉旧组件：不再创建 CapabilityManager / ResourceManager / PromptManager /
+     * EventManager，不再注册 EventController.Listener 与 SSE 端点（resources/prompts/notifications
+     * 通道不暴露，见 doc 05 §1.4、doc 06 §2.4）。
      */
     @Override
     public void onStart() {
@@ -232,22 +202,7 @@ public class AgentBridgeIntegration extends IntegrationBase {
 
         // 2. authManager 已在 onLoad() 中创建
 
-        // 3. 创建 AuditLogger
-        auditLogger = new AuditLogger();
-
-        // 4. 创建 ConfirmationManager（注入 AuditLoggerBridge 适配器）
-        confirmationManager = new ConfirmationManager(new AuditLoggerBridge() {
-            @Override
-            public void logConfirmation(String confirmationId, String action,
-                                        String toolName, String requesterId) {
-                auditLogger.logConfirmation(confirmationId, action, toolName, requesterId);
-            }
-        });
-
-        // 5. 创建 CapabilityManager
-        capabilityManager = new CapabilityManager(httpServerPool, SERVER_IP, SERVER_PORT);
-
-        // 6. 创建 ToolExecutor（注入 InternalTokenProvider 适配器）
+        // 3. 创建 ToolExecutor（注入 InternalTokenProvider 适配器）
         toolExecutor = new ToolExecutor(new ToolExecutor.InternalTokenProvider() {
             @Override
             public String getInternalToken() {
@@ -255,20 +210,23 @@ public class AgentBridgeIntegration extends IntegrationBase {
             }
         });
 
-        // 7. 创建 ResourceManager（注入 core, 然后通过 setter 注入依赖）
-        resourceManager = new ResourceManager(core);
-        resourceManager.setCapabilityManager(capabilityManager);
-        resourceManager.setAuditLogger(auditLogger);
-
-        // 8. 创建 PromptManager
-        promptManager = new PromptManager();
-
-        // BCP SubAgent 装配：候选注册表 + CLI 解析器 + 路由调度器
+        // 4. BCP SubAgent 装配：候选注册表 + CLI 解析器 + 路由调度器
         // P0 候选 SubAgent 在 Phase 3 逐步填入；当前 DeviceSubAgent（依赖 core-api）
+        // MediaSubAgent 注入 MediaUrlSigner：复用 ecat-core-api 的 AuthManager.signMediaUrl，
+        // 进程内强类型直调（非反射）生成 agent 可直接 GET 的无 token 下载 URL（Plan A）。
+        // agent-bridge 依赖 ecat-core-api，启动时 core-api 已 ACTIVE、authManager 已就绪；
+        // 缺失即启动时序异常，严格模式抛异常（不构造无签名器的半功能 MediaSubAgent）。
+        EcatCoreApiIntegration coreApi = (EcatCoreApiIntegration)
+                integrationRegistry.getIntegration("com.ecat:integration-ecat-core-api");
+        if (coreApi == null || coreApi.getAuthManager() == null) {
+            throw new IllegalStateException(
+                    "ecat-core-api 或其 AuthManager 在 agent-bridge 启动时不可用，无法装配 MediaUrlSigner");
+        }
+        MediaUrlSigner mediaUrlSigner = new MediaUrlSigner(coreApi.getAuthManager());
         List<AbstractSubAgent> candidates = new ArrayList<AbstractSubAgent>();
         candidates.add(new DeviceSubAgent());
         candidates.add(new LogicDeviceSubAgent());
-        candidates.add(new MediaSubAgent());
+        candidates.add(new MediaSubAgent(mediaUrlSigner));
         candidates.add(new EventSubAgent());
         subAgentRegistry = new SubAgentRegistry(candidates);
         // 初始 buildIndex：agent-bridge 依赖 core-api，启动时 core-api 已 ACTIVE
@@ -306,40 +264,21 @@ public class AgentBridgeIntegration extends IntegrationBase {
                     }
                 });
 
-        // 9. 创建 McpRequestHandler 实现（内部匿名类）
-        McpRequestHandler requestHandler = new McpRequestHandlerImpl(
-                capabilityManager, toolExecutor, resourceManager,
-                confirmationManager, promptManager, toolDispatcher);
+        // 5. 创建 McpRequestHandler 实现（BCP 仅注入 ToolDispatcher：MCP 只暴露 tools 通道，doc 05 §1.4）
+        McpRequestHandler requestHandler = new McpRequestHandlerImpl(toolDispatcher);
 
-        // 10. 创建 McpServer
+        // 6. 创建 McpServer
         mcpServer = new McpServer(server, authManager, MCP_ENDPOINT, requestHandler);
 
-        // 11. 创建 EventManager（注入 busRegistry, mcpServer, capabilityManager）
-        eventManager = new EventManager(
-                core.getBusRegistry(), mcpServer, capabilityManager);
+        // BCP 架构砍掉 SSE 推送 / notifications / resources / prompts 通道（doc 05 §1.4），
+        // 故不再创建 EventManager、不再注册 EventController.Listener、不再注册 SSE 端点。
 
-        // 12. 注册 EventManager 为 EventController.Listener（统一事件通道）
-        EcatCoreApiIntegration apiIntegration =
-                (EcatCoreApiIntegration) integrationRegistry.getIntegration("com.ecat:integration-ecat-core-api");
-        if (apiIntegration != null && apiIntegration.getEventController() != null) {
-            apiIntegration.getEventController().addListener(eventManager);
-            log.info("EventManager registered as EventController.Listener");
-        } else {
-            log.warn("EventController not available, EventManager won't receive unified events");
-        }
+        // 7. ConfigFlow 静态回调已在 onLoad() 中设置
 
-        // 13. ConfigFlow 静态回调已在 onLoad() 中设置
-
-        // 14. 启动 McpServer — 注册 POST/GET/DELETE /mcp 路由
+        // 8. 启动 McpServer — 注册 POST/DELETE /mcp 路由
         mcpServer.start();
 
-        // 15. 注册 SSE 端点
-        eventManager.registerSseEndpoint(server, authManager);
-
-        // 16. 启动 EventManager（启动截流器 + 订阅 DEVICE_DATA_UPDATE Bus 事件）
-        eventManager.start();
-
-        // 17. 订阅 INTEGRATIONS_ALL_LOADED 事件
+        // 9. 订阅 INTEGRATIONS_ALL_LOADED 事件
         subscribeIntegrationsLoadedEvent();
 
         log.info("Agent Bridge started on {}:{} — MCP endpoint ready at {}",
@@ -367,15 +306,6 @@ public class AgentBridgeIntegration extends IntegrationBase {
      */
     @Override
     public void onPause() {
-        // 移除 EventController.Listener
-        if (eventManager != null) {
-            EcatCoreApiIntegration apiIntegration =
-                    (EcatCoreApiIntegration) integrationRegistry.getIntegration("com.ecat:integration-ecat-core-api");
-            if (apiIntegration != null && apiIntegration.getEventController() != null) {
-                apiIntegration.getEventController().removeListener(eventManager);
-            }
-            eventManager.stop();
-        }
         if (mcpServer != null) {
             mcpServer.stop();
         }
@@ -393,31 +323,13 @@ public class AgentBridgeIntegration extends IntegrationBase {
     /**
      * 释放阶段：释放所有资源。
      *
-     * <p>停止事件管理器、MCP 服务器，关闭审计日志和确认管理器。
+     * <p>停止 MCP 服务器并取消事件订阅。
      */
     @Override
     public void onRelease() {
-        // 移除 EventController.Listener 并停止 EventManager
-        if (eventManager != null) {
-            EcatCoreApiIntegration apiIntegration =
-                    (EcatCoreApiIntegration) integrationRegistry.getIntegration("com.ecat:integration-ecat-core-api");
-            if (apiIntegration != null && apiIntegration.getEventController() != null) {
-                apiIntegration.getEventController().removeListener(eventManager);
-            }
-            eventManager.stop();
-            eventManager = null;
-        }
         if (mcpServer != null) {
             mcpServer.stop();
             mcpServer = null;
-        }
-        if (confirmationManager != null) {
-            confirmationManager.shutdown();
-            confirmationManager = null;
-        }
-        if (auditLogger != null) {
-            auditLogger.close();
-            auditLogger = null;
         }
         if (integrationsLoadedSubscription != null) {
             integrationsLoadedSubscription.unsubscribe();
@@ -426,10 +338,7 @@ public class AgentBridgeIntegration extends IntegrationBase {
         httpServerPool = null;
         server = null;
         authManager = null;
-        capabilityManager = null;
         toolExecutor = null;
-        resourceManager = null;
-        promptManager = null;
         log.info("Agent Bridge released");
     }
 
@@ -451,15 +360,12 @@ public class AgentBridgeIntegration extends IntegrationBase {
         return new AgentBridgeConfigFlow(new AgentBridgeConfigFlow.TokenManagerCallback() {
             @Override
             public String generateToken(String name, String role) {
-                Set<String> permissions = new HashSet<String>();
-                permissions.add("tools:read");
-                permissions.add("resources:read");
-                permissions.add("prompts:read");
-                if ("admin".equals(role)) {
-                    permissions.add("tools:write");
-                    permissions.add("tools:dangerous");
-                }
-                return authManager.generateToken(name, role, permissions).getToken();
+                return authManager.generateToken(name, role).getToken();
+            }
+
+            @Override
+            public String hashToken(String rawToken) {
+                return AgentAuthManager.sha256(rawToken);
             }
         });
     }
@@ -554,9 +460,12 @@ public class AgentBridgeIntegration extends IntegrationBase {
      *
      * <p>当所有集成加载完成后：
      * <ol>
-     *   <li>构建能力索引（从 ecat-core-api 路由元数据生成 MCP 工具）</li>
+     *   <li>全量对账 SubAgent 索引（解决启动时序竞争，Bug #3）</li>
      *   <li>获取 ecat-core-api 内部 session token</li>
      * </ol>
+     *
+     * <p>BCP 架构下不再构建 CapabilityManager 能力索引（旧 CapabilityManager 已移除，
+     * 能力发现下沉到 SubAgent，见 doc 06 §2.3/§2.4）。
      */
     private void subscribeIntegrationsLoadedEvent() {
         integrationsLoadedSubscription = core.getBusRegistry().subscribe(
@@ -567,9 +476,8 @@ public class AgentBridgeIntegration extends IntegrationBase {
                         // 全量对账 SubAgent 索引：解决启动时序竞争，确保所有已加载依赖集成的
                         // SubAgent（如依赖 media-api 的 media agent）被注册（Bug #3）。
                         reconcileSubAgentsFromRegistry();
-                        capabilityManager.buildIndex();
                         obtainInternalToken();
-                        log.info("Agent Bridge initialized: capability index built, internal token obtained");
+                        log.info("Agent Bridge initialized: SubAgent index reconciled, internal token obtained");
                     }
                 });
     }
@@ -645,31 +553,20 @@ public class AgentBridgeIntegration extends IntegrationBase {
      */
     private class McpRequestHandlerImpl implements McpRequestHandler {
 
-        private final CapabilityManager capManager;
-        private final ToolExecutor tExecutor;
-        private final ResourceManager rManager;
-        private final ConfirmationManager confManager;
-        private final PromptManager pManager;
         private final ToolDispatcher toolDispatcher;
 
         /**
          * 构造器。
          *
-         * @param capManager     能力组管理器（Phase 5 废弃，暂保留兼容）
-         * @param tExecutor      工具执行器
-         * @param rManager       资源管理器（Phase 5 废弃）
-         * @param confManager    确认请求管理器
-         * @param pManager       提示词管理器（Phase 5 废弃）
+         * <p>BCP 架构下 MCP 仅暴露 tools 通道（getTools/useTools），能力下沉到 SubAgent
+         * 由 toolDispatcher 路由；resources/prompts 分支返回空列表保留 MCP 握手兼容
+         * （doc 05 §1.4 / doc 06 §2.4）。旧内置工具（search/load capabilities、audit、
+         * confirm、async-result）及其依赖（CapabilityManager/ResourceManager/PromptManager/
+         * ConfirmationManager）已废弃移除。
+         *
          * @param toolDispatcher BCP 两工具路由调度器（getTools/useTools）
          */
-        McpRequestHandlerImpl(CapabilityManager capManager, ToolExecutor tExecutor,
-                              ResourceManager rManager, ConfirmationManager confManager,
-                              PromptManager pManager, ToolDispatcher toolDispatcher) {
-            this.capManager = capManager;
-            this.tExecutor = tExecutor;
-            this.rManager = rManager;
-            this.confManager = confManager;
-            this.pManager = pManager;
+        McpRequestHandlerImpl(ToolDispatcher toolDispatcher) {
             this.toolDispatcher = toolDispatcher;
         }
 
@@ -708,7 +605,6 @@ public class AgentBridgeIntegration extends IntegrationBase {
          * 处理 initialize 请求 — MCP 握手。
          */
         private JsonRpcResponse handleInitialize(JsonRpcRequest request, McpSession session) {
-            session.setInitialized(true);
             Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
             result.put("protocolVersion", "2025-03-26");
 
@@ -730,15 +626,16 @@ public class AgentBridgeIntegration extends IntegrationBase {
          */
         private JsonRpcResponse handleToolsList(JsonRpcRequest request, McpSession session) {
             java.util.List<Map<String, Object>> tools = new java.util.ArrayList<Map<String, Object>>();
+            // getTools 的 description 即能力菜单（BCP/Nexus 元工具模式，doc 03 §Part 3）：
+            // 模型在 tools/list 阶段即可读到「领域 Agents: agent: [tools,...]」清单，无需调用。
             tools.add(buildBcpToolSchema("getTools",
-                    "发现可用工具。无参返回所有已注册 SubAgent 的全部工具；"
-                    + "传 {\"tool\":\"<agentName>\"} 返回指定 SubAgent 的工具。"
-                    + "当前可用 SubAgent: " + toolDispatcher.capabilityIndex().keySet(),
-                    true));
+                    toolDispatcher.buildGetToolsDescription(),
+                    true,
+                    toolDispatcher.buildGetToolsParamHint()));
             tools.add(buildBcpToolSchema("useTools",
-                    "执行 CLI 命令。传 {\"tool\":\"<agent> <tool> [--flag value...]\"}，"
-                    + "例如 {\"tool\":\"device list\"}。先用 getTools 查看可用命令与参数。",
-                    false));
+                    toolDispatcher.buildUseToolsDescription(),
+                    false,
+                    "完整 CLI 命令串，如 \"device list\""));
             Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
             result.put("tools", tools);
             return JsonRpcResponse.success(request.getId(), result);
@@ -747,12 +644,14 @@ public class AgentBridgeIntegration extends IntegrationBase {
         /**
          * 构造 BCP 工具 schema（name/description/inputSchema）。
          *
-         * @param name         工具名（getTools/useTools）
-         * @param description  工具描述
-         * @param toolOptional tool 参数是否可选（getTools 可选，useTools 必填）
+         * @param name          工具名（getTools/useTools）
+         * @param description   工具描述
+         * @param toolOptional  tool 参数是否可选（getTools 可选，useTools 必填）
+         * @param toolParamHint tool 参数的语义说明（getTools 传领域 agent 名；useTools 传 CLI 串）——
+         *                      两工具共用 tool 参数但语义不同，各自点破避免 agent 困惑
          */
         private Map<String, Object> buildBcpToolSchema(String name, String description,
-                                                       boolean toolOptional) {
+                                                       boolean toolOptional, String toolParamHint) {
             Map<String, Object> tool = new java.util.LinkedHashMap<String, Object>();
             tool.put("name", name);
             tool.put("description", description);
@@ -761,7 +660,7 @@ public class AgentBridgeIntegration extends IntegrationBase {
             inputSchema.put("type", "object");
             Map<String, Object> toolProp = new java.util.LinkedHashMap<String, Object>();
             toolProp.put("type", "string");
-            toolProp.put("description", "CLI 命令串（useTools）或 SubAgent 名（getTools）");
+            toolProp.put("description", toolParamHint);
             Map<String, Object> properties = new java.util.LinkedHashMap<String, Object>();
             properties.put("tool", toolProp);
             inputSchema.put("properties", properties);
@@ -803,7 +702,8 @@ public class AgentBridgeIntegration extends IntegrationBase {
                         throw new McpException(JsonRpcResponse.INVALID_PARAMS,
                                 "useTools 需要 'tool' 参数（CLI 命令串）");
                     }
-                    return toolResultToResponse(request, toolDispatcher.useTools(cli));
+                    // 透传当前请求 Host（进程内工具如 media get-download-url 据此拼下载 URL）
+                    return toolResultToResponse(request, toolDispatcher.useTools(cli, session.getRequestHostPort()));
                 }
                 default:
                     throw new McpException(JsonRpcResponse.INVALID_PARAMS,
@@ -834,279 +734,52 @@ public class AgentBridgeIntegration extends IntegrationBase {
         }
 
         /**
-         * 处理 ecat_search_capabilities 内置工具。
-         */
-        private JsonRpcResponse handleSearchCapabilities(JsonRpcRequest request,
-                                                         Map<String, Object> params) {
-            String query = (String) params.get("query");
-            if (query == null) {
-                query = "";
-            }
-            java.util.List<Map<String, Object>> results = new java.util.ArrayList<Map<String, Object>>();
-            for (com.ecat.integration.agentbridge.capability.CapabilityGroupSummary summary
-                    : capManager.searchCapabilities(query)) {
-                Map<String, Object> entry = new java.util.LinkedHashMap<String, Object>();
-                entry.put("groupId", summary.getGroupId());
-                entry.put("displayName", summary.getDisplayName());
-                entry.put("toolCount", summary.getToolCount());
-                entry.put("safetyLevel", summary.getSafetyLevel());
-                results.add(entry);
-            }
-
-            java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("type", "text");
-            textContent.put("text", com.alibaba.fastjson2.JSON.toJSONString(results));
-            content.add(textContent);
-
-            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("content", content);
-            result.put("isError", false);
-            return JsonRpcResponse.success(request.getId(), result);
-        }
-
-        /**
-         * 处理 ecat_load_capabilities 内置工具。
-         */
-        private JsonRpcResponse handleLoadCapabilities(JsonRpcRequest request,
-                                                        Map<String, Object> params,
-                                                        McpSession session) {
-            String groupId = (String) params.get("groupId");
-            if (groupId == null || groupId.isEmpty()) {
-                java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-                Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-                textContent.put("type", "text");
-                textContent.put("text", "groupId is required");
-                content.add(textContent);
-                Map<String, Object> errResult = new java.util.LinkedHashMap<String, Object>();
-                errResult.put("content", content);
-                errResult.put("isError", true);
-                return JsonRpcResponse.success(request.getId(), errResult);
-            }
-
-            com.ecat.integration.agentbridge.capability.LoadResult loadResult =
-                    capManager.loadCapabilities(groupId, session, mcpServer);
-
-            String message = loadResult.isSuccess()
-                    ? "Loaded " + loadResult.getToolCount() + " tools from group: " + groupId
-                    : loadResult.getErrorMessage();
-
-            java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("type", "text");
-            textContent.put("text", message);
-            content.add(textContent);
-
-            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("content", content);
-            result.put("isError", !loadResult.isSuccess());
-            return JsonRpcResponse.success(request.getId(), result);
-        }
-
-        /**
-         * 处理 query_audit_log 内置工具 — 查询审计日志。
-         */
-        private JsonRpcResponse handleQueryAuditLog(JsonRpcRequest request,
-                                                     Map<String, Object> params) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> arguments = (Map<String, Object>) params.get("arguments");
-            if (arguments == null) {
-                arguments = new java.util.HashMap<String, Object>();
-            }
-
-            long endTime = System.currentTimeMillis();
-            long startTime = endTime - 24 * 60 * 60 * 1000L; // 默认最近 24 小时
-            if (arguments.get("startTime") != null) {
-                try {
-                    startTime = Long.parseLong(arguments.get("startTime").toString());
-                } catch (NumberFormatException e) {
-                    // 保持默认值
-                }
-            }
-            if (arguments.get("endTime") != null) {
-                try {
-                    endTime = Long.parseLong(arguments.get("endTime").toString());
-                } catch (NumberFormatException e) {
-                    // 保持默认值
-                }
-            }
-            int limit = 50;
-            if (arguments.get("limit") != null) {
-                try {
-                    limit = Integer.parseInt(arguments.get("limit").toString());
-                } catch (NumberFormatException e) {
-                    // 保持默认值
-                }
-            }
-
-            java.util.List<com.ecat.integration.agentbridge.audit.AuditRecord> records =
-                    auditLogger != null ? auditLogger.query(startTime, endTime, limit)
-                            : java.util.Collections.<com.ecat.integration.agentbridge.audit.AuditRecord>emptyList();
-
-            java.util.List<Map<String, Object>> recordList = new java.util.ArrayList<Map<String, Object>>();
-            for (com.ecat.integration.agentbridge.audit.AuditRecord record : records) {
-                Map<String, Object> entry = new java.util.LinkedHashMap<String, Object>();
-                entry.put("timestamp", record.getTimestamp());
-                entry.put("agentId", record.getAgentId());
-                entry.put("toolName", record.getToolName());
-                entry.put("status", record.getStatus());
-                entry.put("sessionId", record.getSessionId());
-                recordList.add(entry);
-            }
-
-            java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("type", "text");
-            textContent.put("text", com.alibaba.fastjson2.JSON.toJSONString(recordList));
-            content.add(textContent);
-
-            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("content", content);
-            result.put("isError", false);
-            return JsonRpcResponse.success(request.getId(), result);
-        }
-
-        /**
-         * 处理 confirm_operation 内置工具 — 确认高风险操作。
-         */
-        private JsonRpcResponse handleConfirmOperation(JsonRpcRequest request,
-                                                        Map<String, Object> params) throws McpException {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> arguments = (Map<String, Object>) params.get("arguments");
-            if (arguments == null) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, "arguments required");
-            }
-
-            String operationId = (String) arguments.get("operationId");
-            String confirmCode = (String) arguments.get("confirmCode");
-            if (operationId == null || confirmCode == null) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS,
-                        "operationId and confirmCode are required");
-            }
-
-            // ConfirmationManager.confirm() 仅接受 confirmationId
-            // confirmCode 作为操作验证的一部分暂存在 ConfirmationRequest 中
-            boolean confirmed = confManager.confirm(operationId);
-            String message = confirmed ? "Operation confirmed: " + operationId
-                    : "Confirmation failed: invalid code or expired";
-
-            java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("type", "text");
-            textContent.put("text", message);
-            content.add(textContent);
-
-            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("content", content);
-            result.put("isError", !confirmed);
-            return JsonRpcResponse.success(request.getId(), result);
-        }
-
-        /**
-         * 处理 query_async_result 内置工具 — 查询异步操作结果。
-         */
-        private JsonRpcResponse handleQueryAsyncResult(JsonRpcRequest request,
-                                                        Map<String, Object> params) throws McpException {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> arguments = (Map<String, Object>) params.get("arguments");
-            if (arguments == null) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, "arguments required");
-            }
-
-            String executionId = (String) arguments.get("executionId");
-            if (executionId == null || executionId.isEmpty()) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, "executionId is required");
-            }
-
-            // 通过 ToolExecutor 调用 ecat-core-api 的 async result 端点
-            Map<String, Object> callArgs = new java.util.HashMap<String, Object>();
-            callArgs.put("executionId", executionId);
-
-            String baseUrl = "http://" + SERVER_IP + ":" + SERVER_PORT;
-            Map<String, Object> asyncResult = new java.util.LinkedHashMap<String, Object>();
-            asyncResult.put("executionId", executionId);
-            asyncResult.put("message", "Async result query delegated to ecat-core-api endpoint");
-
-            java.util.List<Map<String, Object>> content = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("type", "text");
-            textContent.put("text", com.alibaba.fastjson2.JSON.toJSONString(asyncResult));
-            content.add(textContent);
-
-            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("content", content);
-            result.put("isError", false);
-            return JsonRpcResponse.success(request.getId(), result);
-        }
-
-        /**
          * 处理 resources/list 请求。
+         *
+         * <p>BCP 架构仅暴露 tools 通道（doc 05 §1.4），resources 不对外暴露。
+         * 保留此方法以兼容 MCP 握手探测（doc 06 §2.4），固定返回空列表。
          */
         private JsonRpcResponse handleResourcesList(JsonRpcRequest request, McpSession session) {
             Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("resources", rManager.listResources());
+            result.put("resources", new java.util.ArrayList<Object>());
             return JsonRpcResponse.success(request.getId(), result);
         }
 
         /**
          * 处理 resources/read 请求。
+         *
+         * <p>BCP 架构仅暴露 tools 通道（doc 05 §1.4），resources 不对外暴露。
+         * 保留此方法以兼容 MCP 握手探测（doc 06 §2.4），固定返回空 contents 列表，
+         * 不再校验 uri / 读取资源。
          */
-        private JsonRpcResponse handleResourcesRead(JsonRpcRequest request, McpSession session)
-                throws McpException {
-            Map<String, Object> params = request.getParamsAsMap();
-            String uri = (String) params.get("uri");
-            if (uri == null || uri.isEmpty()) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, "uri is required");
-            }
-
-            Map<String, Object> resourceContent;
-            try {
-                resourceContent = rManager.readResource(uri);
-            } catch (IllegalArgumentException e) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, e.getMessage());
-            }
-            java.util.List<Map<String, Object>> contents = new java.util.ArrayList<Map<String, Object>>();
-            Map<String, Object> textContent = new java.util.LinkedHashMap<String, Object>();
-            textContent.put("uri", uri);
-            textContent.put("mimeType", "application/json");
-            textContent.put("text", com.alibaba.fastjson2.JSON.toJSONString(resourceContent));
-            contents.add(textContent);
-
+        private JsonRpcResponse handleResourcesRead(JsonRpcRequest request, McpSession session) {
             Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("contents", contents);
+            result.put("contents", new java.util.ArrayList<Object>());
             return JsonRpcResponse.success(request.getId(), result);
         }
 
         /**
          * 处理 prompts/list 请求。
+         *
+         * <p>BCP 架构仅暴露 tools 通道（doc 05 §1.4），prompts 不对外暴露。
+         * 保留此方法以兼容 MCP 握手探测（doc 06 §2.4），固定返回空列表。
          */
         private JsonRpcResponse handlePromptsList(JsonRpcRequest request, McpSession session) {
             Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
-            result.put("prompts", pManager.listPrompts());
+            result.put("prompts", new java.util.ArrayList<Object>());
             return JsonRpcResponse.success(request.getId(), result);
         }
 
         /**
          * 处理 prompts/get 请求。
+         *
+         * <p>BCP 架构仅暴露 tools 通道（doc 05 §1.4），prompts 不对外暴露。
+         * 保留此方法以兼容 MCP 握手探测（doc 06 §2.4），固定返回空 messages 列表，
+         * 不再校验 name / 渲染模板。
          */
-        private JsonRpcResponse handlePromptsGet(JsonRpcRequest request, McpSession session)
-                throws McpException {
-            Map<String, Object> params = request.getParamsAsMap();
-            String name = (String) params.get("name");
-            if (name == null || name.isEmpty()) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, "name is required");
-            }
-
-            // 提取 arguments
-            @SuppressWarnings("unchecked")
-            Map<String, String> arguments = (Map<String, String>) params.get("arguments");
-
-            Map<String, Object> result;
-            try {
-                result = pManager.getPrompt(name, arguments);
-            } catch (IllegalArgumentException e) {
-                throw new McpException(JsonRpcResponse.INVALID_PARAMS, e.getMessage());
-            }
+        private JsonRpcResponse handlePromptsGet(JsonRpcRequest request, McpSession session) {
+            Map<String, Object> result = new java.util.LinkedHashMap<String, Object>();
+            result.put("messages", new java.util.ArrayList<Object>());
             return JsonRpcResponse.success(request.getId(), result);
         }
     }

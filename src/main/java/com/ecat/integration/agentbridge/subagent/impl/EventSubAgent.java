@@ -2,7 +2,6 @@ package com.ecat.integration.agentbridge.subagent.impl;
 
 import com.ecat.integration.agentbridge.subagent.AbstractSubAgent;
 import com.ecat.integration.agentbridge.subagent.ArgDescriptor;
-import com.ecat.integration.agentbridge.subagent.SafetyLevel;
 import com.ecat.integration.agentbridge.subagent.ToolDescriptor;
 
 import java.util.Arrays;
@@ -46,7 +45,6 @@ public class EventSubAgent extends AbstractSubAgent {
                                 .description("异步操作 ID，由 set-attribute 等异步工具返回").build()))
                 .examples(Arrays.asList("event query-async-result --id async-1"))
                 .httpMethod("GET").httpPath("/core-api/events/async/{id}")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 }

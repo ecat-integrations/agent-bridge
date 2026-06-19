@@ -2,7 +2,6 @@ package com.ecat.integration.agentbridge.subagent.impl;
 
 import com.ecat.integration.agentbridge.subagent.AbstractSubAgent;
 import com.ecat.integration.agentbridge.subagent.ArgDescriptor;
-import com.ecat.integration.agentbridge.subagent.SafetyLevel;
 import com.ecat.integration.agentbridge.subagent.ToolDescriptor;
 
 import java.util.Arrays;
@@ -53,7 +52,6 @@ public class DeviceSubAgent extends AbstractSubAgent {
                 .examples(Arrays.asList("device list",
                         "device list --coordinate com.ecat:integration-sailhero"))
                 .httpMethod("GET").httpPath("/core-api/devices")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -67,7 +65,6 @@ public class DeviceSubAgent extends AbstractSubAgent {
                                 .description("设备唯一标识符，可通过 device list 获取").build()))
                 .examples(Arrays.asList("device get --id sensor-01"))
                 .httpMethod("GET").httpPath("/core-api/devices/{id}")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -81,7 +78,6 @@ public class DeviceSubAgent extends AbstractSubAgent {
                                 .description("设备唯一标识符").build()))
                 .examples(Arrays.asList("device get-attributes --id sensor-01"))
                 .httpMethod("GET").httpPath("/core-api/devices/{id}/attributes")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -96,7 +92,6 @@ public class DeviceSubAgent extends AbstractSubAgent {
                                 .description("设备唯一标识符").build()))
                 .examples(Arrays.asList("device get-attribute-schemas --id sensor-01"))
                 .httpMethod("GET").httpPath("/core-api/devices/{id}/attribute/schemas")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -119,7 +114,7 @@ public class DeviceSubAgent extends AbstractSubAgent {
                 .examples(Arrays.asList(
                         "device set-attribute --id sensor-01 --attr-id temperature --value 25.5 --unit \"°C\""))
                 .httpMethod("PUT").httpPath("/core-api/devices/{id}/attributes/{attrId}/value")
-                .safetyLevel(SafetyLevel.MODERATE).async()
+                .async()
                 .build();
     }
 }

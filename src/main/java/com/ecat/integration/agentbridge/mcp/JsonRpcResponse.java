@@ -80,28 +80,6 @@ public class JsonRpcResponse {
     }
 
     /**
-     * 创建带附加数据的错误响应。
-     *
-     * @param id      请求 ID
-     * @param code    错误码
-     * @param message 错误消息
-     * @param data    附加数据
-     * @return 错误响应
-     */
-    public static JsonRpcResponse error(Object id, int code, String message, Object data) {
-        return new JsonRpcResponse("2.0", id, null, new ErrorObject(code, message, data));
-    }
-
-    /**
-     * 判断是否为成功响应。
-     *
-     * @return true 表示成功
-     */
-    public boolean isSuccess() {
-        return error == null;
-    }
-
-    /**
      * 序列化为 JSON 字符串。
      *
      * @return JSON 格式字符串
@@ -116,42 +94,6 @@ public class JsonRpcResponse {
             map.put("result", result);
         }
         return JSON.toJSONString(map);
-    }
-
-    /**
-     * 获取协议版本
-     *
-     * @return 协议版本字符串
-     */
-    public String getJsonrpc() {
-        return jsonrpc;
-    }
-
-    /**
-     * 获取请求 ID
-     *
-     * @return 请求 ID
-     */
-    public Object getId() {
-        return id;
-    }
-
-    /**
-     * 获取成功结果
-     *
-     * @return 结果数据，失败时为 null
-     */
-    public Object getResult() {
-        return result;
-    }
-
-    /**
-     * 获取错误对象
-     *
-     * @return 错误对象，成功时为 null
-     */
-    public ErrorObject getError() {
-        return error;
     }
 
     /**

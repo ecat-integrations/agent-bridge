@@ -2,12 +2,14 @@ package com.ecat.integration.agentbridge;
 
 import com.ecat.core.EcatCore;
 import com.ecat.core.Integration.IntegrationRegistry;
+import com.ecat.integration.EcatCoreApiIntegration.Auth.AuthManager;
 import com.ecat.integration.agentbridge.subagent.AbstractSubAgent;
 import com.ecat.integration.agentbridge.subagent.SubAgentRegistry;
 import com.ecat.integration.agentbridge.subagent.impl.DeviceSubAgent;
 import com.ecat.integration.agentbridge.subagent.impl.EventSubAgent;
 import com.ecat.integration.agentbridge.subagent.impl.LogicDeviceSubAgent;
 import com.ecat.integration.agentbridge.subagent.impl.MediaSubAgent;
+import com.ecat.integration.agentbridge.tool.MediaUrlSigner;
 import org.junit.Test;
 
 import java.lang.reflect.Field;
@@ -54,7 +56,8 @@ public class AgentBridgeIntegrationSubAgentReconcileTest {
     /** 与生产代码 onLoad 一致的 4 个候选 SubAgent。 */
     private static SubAgentRegistry newRegistryWithAllCandidates() {
         return new SubAgentRegistry(Arrays.<AbstractSubAgent>asList(
-                new DeviceSubAgent(), new LogicDeviceSubAgent(), new MediaSubAgent(), new EventSubAgent()));
+                new DeviceSubAgent(), new LogicDeviceSubAgent(),
+                new MediaSubAgent(new MediaUrlSigner(mock(AuthManager.class))), new EventSubAgent()));
     }
 
     /**

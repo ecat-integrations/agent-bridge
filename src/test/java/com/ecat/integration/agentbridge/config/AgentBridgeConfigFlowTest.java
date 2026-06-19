@@ -1,6 +1,7 @@
 package com.ecat.integration.agentbridge.config;
 
 import com.ecat.core.ConfigFlow.ConfigFlowResult;
+import com.ecat.integration.agentbridge.auth.AgentAuthManager;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -37,6 +38,11 @@ public class AgentBridgeConfigFlowTest {
                         lastGeneratedTokenName = name;
                         lastGeneratedTokenRole = role;
                         return TEST_TOKEN;
+                    }
+
+                    @Override
+                    public String hashToken(String rawToken) {
+                        return AgentAuthManager.sha256(rawToken);
                     }
                 };
 
@@ -216,6 +222,33 @@ public class AgentBridgeConfigFlowTest {
         assertEquals(TEST_TOKEN, result.getEntryData().get("rawToken"));
         // _rawToken should have been removed from entry data
         assertNull(result.getEntryData().get("_rawToken"));
+        // tokenHash（SHA-256，hash-only）应被持久化到 entry data，供重启后 loadFromEntries 恢复
+        assertEquals(AgentAuthManager.sha256(TEST_TOKEN), result.getEntryData().get("tokenHash"));
+    }
+
+    /**
+     * final_confirm 应把 tokenHash（SHA-256）写入持久化 entryData，使重启后
+     * AgentAuthManager.loadFromEntries 能据此恢复有效 token（hash-only 持久化修复的核心断言）。
+     */
+    @Test
+    public void stepFinalConfirm_persistsTokenHash() {
+        Map<String, Object> setupInput = new HashMap<String, Object>();
+        setupInput.put("name", "persist-agent");
+        setupInput.put("role", "admin");
+        flow.executeUserStep(setupInput);
+
+        Map<String, Object> confirmInput = new HashMap<String, Object>();
+        confirmInput.put("confirmed", "true");
+
+        flow.handleStep("final_confirm", confirmInput);
+
+        Map<String, Object> entryData = flow.getContext().getEntryData();
+        // tokenHash 必须是 TEST_TOKEN 的 SHA-256（与生产 generateToken 同一 sha256 函数）
+        Object tokenHash = entryData.get("tokenHash");
+        assertNotNull("tokenHash must be persisted for cross-restart restore", tokenHash);
+        assertEquals(AgentAuthManager.sha256(TEST_TOKEN), tokenHash);
+        // 原始 token 不得落盘（hash-only）
+        assertNull("rawToken must not be persisted (hash-only)", entryData.get("_rawToken"));
     }
 
     @Test
@@ -241,6 +274,11 @@ public class AgentBridgeConfigFlowTest {
                     @Override
                     public String generateToken(String name, String role) {
                         return "generated-" + name + "-" + role;
+                    }
+
+                    @Override
+                    public String hashToken(String rawToken) {
+                        return AgentAuthManager.sha256(rawToken);
                     }
                 };
         assertEquals("generated-myAgent-admin", cb.generateToken("myAgent", "admin"));

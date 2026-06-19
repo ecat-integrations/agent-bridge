@@ -3,39 +3,28 @@ package com.ecat.integration.agentbridge.mcp;
 import com.ecat.integration.HttpServerIntegration.EasyHttpServer;
 import com.ecat.integration.HttpServerIntegration.exchange.EasyHttpExchange;
 import com.ecat.integration.HttpServerIntegration.exchange.EasyHttpHandler;
-import com.ecat.integration.HttpServerIntegration.handler.SseConnection;
-import com.ecat.integration.HttpServerIntegration.handler.SseHandler;
 import com.ecat.integration.agentbridge.auth.AuthException;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * MCP Streamable HTTP 传输实现。
  *
- * <p>实现 MCP 协议的 Streamable HTTP 传输规范，在单个 HTTP endpoint 上处理三种请求：
+ * <p>实现 MCP 协议的 Streamable HTTP 传输规范，在单个 HTTP endpoint 上处理两种请求：
  * <ul>
  *   <li>POST — 接收 JSON-RPC 请求，返回 JSON-RPC 响应</li>
- *   <li>GET  — 建立 SSE 长连接，服务端推送通知</li>
  *   <li>DELETE — 关闭指定会话</li>
  * </ul>
  *
- * <p>参照 LogController SSE 模式实现 GET 长连接和 keepalive 心跳。
+ * <p>BCP 重构已移除 server→client 推送通道（原 SSE GET 长连接）：
+ * 当前仅暴露 {@code tools} 通道，Agent 用 {@code getTools}/{@code useTools} 主动拉取能力（doc 05 §1.4）。
  *
  * @author coffee
  */
 public class McpServer {
-
-    /** SSE keepalive 间隔（毫秒） */
-    private static final long SSE_KEEPALIVE_INTERVAL_MS = 30000L;
 
     private final EasyHttpServer httpServer;
     private final McpAuthenticator authenticator;
@@ -52,7 +41,7 @@ public class McpServer {
      * 构造器
      *
      * @param httpServer     HTTP 服务器实例
-     * @param authenticator  MCP 认证器（Agent 3B 的 AgentAuthManager 实现此接口）
+     * @param authenticator  MCP 认证器（AgentAuthManager 实现此接口）
      * @param endpoint       MCP endpoint 路径，如 "/mcp"
      * @param requestHandler MCP 请求处理器
      */
@@ -77,8 +66,10 @@ public class McpServer {
     }
 
     /**
-     * 启动 MCP 服务器，注册 POST / GET / DELETE 路由。
-     * GET 路由使用原生 SseHandler，Undertow 自动管理 SSE 连接和 keepalive。
+     * 启动 MCP 服务器，注册 POST / DELETE 路由。
+     *
+     * <p>SSE GET 路由已在 BCP 重构移除（doc 05/06 砍 SSE 推送决策）：
+     * agent-bridge 不需 server→client push channel，仅靠 POST/DELETE 即可。
      */
     public void start() {
         if (running) {
@@ -90,8 +81,6 @@ public class McpServer {
                 handlePost(exchange);
             }
         }));
-        // SSE GET 路由已移除（doc 05/06 砍 SSE 推送决策）：原 GET SseHandler 与 POST 同 path，
-        // 砍 SSE 后 agent-bridge 不需 server→client push channel。POST/DELETE 正常注册。
         httpServer.registerUrl(endpoint, "DELETE", EasyHttpServer.blocking(new EasyHttpHandler() {
             @Override
             public void handle(EasyHttpExchange exchange) throws Exception {
@@ -117,70 +106,6 @@ public class McpServer {
             session.close();
         }
         sessions.clear();
-    }
-
-    /**
-     * 向所有活跃会话推送通知。
-     *
-     * @param notification JSON-RPC 通知
-     */
-    public void sendNotification(JsonRpcNotification notification) {
-        String sseData = notification.toSseData();
-        List<String> closedSessions = new ArrayList<String>();
-        for (Map.Entry<String, McpSession> entry : sessions.entrySet()) {
-            McpSession session = entry.getValue();
-            if (session.isActive()) {
-                try {
-                    session.sendSseEvent(sseData);
-                } catch (IOException e) {
-                    // SSE 流已关闭，标记清理
-                    closedSessions.add(entry.getKey());
-                }
-            } else {
-                closedSessions.add(entry.getKey());
-            }
-        }
-        // 清理已关闭的会话
-        for (String sessionId : closedSessions) {
-            McpSession removed = sessions.remove(sessionId);
-            if (removed != null) {
-                removed.close();
-            }
-        }
-    }
-
-    /**
-     * 向指定会话推送通知。
-     *
-     * @param sessionId    目标会话 ID
-     * @param notification JSON-RPC 通知
-     * @throws IOException 会话不存在或 SSE 流已关闭时抛出
-     */
-    public void sendNotification(String sessionId, JsonRpcNotification notification) throws IOException {
-        McpSession session = sessions.get(sessionId);
-        if (session == null) {
-            throw new IOException("Session not found: " + sessionId);
-        }
-        session.sendSseEvent(notification.toSseData());
-    }
-
-    /**
-     * 获取活跃会话数量
-     *
-     * @return 活跃会话数
-     */
-    public int getActiveSessionCount() {
-        return sessions.size();
-    }
-
-    /**
-     * 获取指定会话
-     *
-     * @param sessionId 会话 ID
-     * @return 会话对象，不存在时返回 null
-     */
-    public McpSession getSession(String sessionId) {
-        return sessions.get(sessionId);
     }
 
     // ===== HTTP 方法处理器 =====
@@ -240,6 +165,10 @@ public class McpServer {
             sessionId = session.getId();
         }
 
+        // 刷新当前请求 Host（每次 POST 都设，保证会话复用时也取最新 host），
+        // 供进程内工具（media get-download-url）拼装对 agent 可达的下载 URL。无 Host 头时为 null。
+        session.setRequestHostPort(extractHostPort(exchange));
+
         // 5. 调用请求处理器
         JsonRpcResponse response;
         try {
@@ -262,48 +191,6 @@ public class McpServer {
             exchange.sendResponseHeaders(202, -1L);
             exchange.close();
         }
-    }
-
-    /**
-     * SSE 连接建立回调。由 Undertow ServerSentEventHandler 在新连接建立时调用。
-     *
-     * <p>替代原 handleGet 的 Thread.sleep + OutputStream 模式。
-     * Undertow 自动管理 keepalive（setKeepAliveTime），无需手动发送心跳。
-     *
-     * @param conn        SSE 连接（线程安全，可从任意线程调用 send）
-     * @param lastEventId 客户端 Last-Event-ID 头（断线重连支持）
-     */
-    private void onSseConnect(SseConnection conn, String lastEventId) {
-        // 认证：从 SseConnection 提取 token
-        String token = extractTokenFromSseConnection(conn);
-        try {
-            authenticator.authenticateByToken(token);
-        } catch (Exception e) {
-            try { conn.close(); } catch (IOException ignored) {}
-            return;
-        }
-
-        // 提取 sessionId
-        String sessionId = extractSessionIdFromSseConnection(conn);
-        if (sessionId == null || sessionId.isEmpty()) {
-            try { conn.close(); } catch (IOException ignored) {}
-            return;
-        }
-
-        McpSession session = sessions.get(sessionId);
-        if (session == null) {
-            try { conn.close(); } catch (IOException ignored) {}
-            return;
-        }
-
-        // 设置 keepalive — Undertow 自动发送 ":" 注释帧
-        conn.setKeepAliveTime(SSE_KEEPALIVE_INTERVAL_MS);
-
-        // 注册 SSE 连接到会话
-        session.setSseConnection(conn);
-
-        // 注册关闭回调：清理会话中的 SSE 连接引用
-        conn.onClose(() -> session.setSseConnection(null));
     }
 
     /**
@@ -358,7 +245,7 @@ public class McpServer {
      * 从 Mcp-Session-Id header 或 ?token= query param 提取会话 ID。
      *
      * <p>MCP Streamable HTTP 规范：GET 和 DELETE 通过 Mcp-Session-Id header
-     * 标识会话，也可以通过 ?token= query param 传递（SSE 场景浏览器无法设置 header）。
+     * 标识会话，也可以通过 ?token= query param 传递（浏览器/无 header 客户端场景）。
      */
     private String extractSessionId(EasyHttpExchange exchange) {
         // 优先从 header 获取
@@ -381,39 +268,14 @@ public class McpServer {
     }
 
     /**
-     * 从 SseConnection 提取会话 ID（用于 SSE 场景）。
-     * 逻辑与 extractSessionId(EasyHttpExchange) 一致，数据来源为 SseConnection。
+     * 提取 MCP 请求 Host header 的 host:port，供进程内工具拼装对 agent 可达的下载 URL。
+     *
+     * <p>Host header 形如 {@code 127.0.0.1:9999} / {@code core.example.com:8080}，直接取整段作为
+     * host:port（HTTP/1.1 Host 头本就是 host[:port]）。无 Host 头返回 null（进程内工具回退 baseUrl）。
      */
-    private String extractSessionIdFromSseConnection(SseConnection conn) {
-        // 1. 从 Mcp-Session-Id header 获取
-        String sessionId = conn.getRequestHeaders().getFirst("Mcp-Session-Id");
-        if (sessionId != null && !sessionId.isEmpty()) {
-            return sessionId;
-        }
-        // 2. 从 ?token= query param 获取
-        Deque<String> tokens = conn.getQueryParameters().get("token");
-        if (tokens != null && !tokens.isEmpty()) {
-            return tokens.getFirst();
-        }
-        return null;
-    }
-
-    /**
-     * 从 SseConnection 提取认证 token（用于 SSE 场景）。
-     * 优先从 Authorization header 获取，回退到 ?token= query param。
-     */
-    private String extractTokenFromSseConnection(SseConnection conn) {
-        // 1. 从 Authorization header 获取
-        String authHeader = conn.getRequestHeaders().getFirst("Authorization");
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            return authHeader.substring(7).trim();
-        }
-        // 2. 从 ?token= query param 获取
-        Deque<String> tokens = conn.getQueryParameters().get("token");
-        if (tokens != null && !tokens.isEmpty()) {
-            return tokens.getFirst();
-        }
-        return null;
+    private String extractHostPort(EasyHttpExchange exchange) {
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        return (host == null || host.isEmpty()) ? null : host;
     }
 
     /**

@@ -58,17 +58,20 @@ public abstract class AbstractSubAgent {
      * 执行工具调用。
      *
      * <p>默认实现委托 {@link ToolExecutor} 发 HTTP 请求（业务 SubAgent 直接复用）。
-     * 进程内调用工具（如 {@code system confirm}）override 此方法，不走 HTTP。
+     * 进程内调用工具（如 {@code media get-download-url}）override 此方法，不走 HTTP。
      *
-     * @param tool         工具定义
-     * @param params       解析后的参数
-     * @param toolExecutor HTTP 执行器（默认实现使用）
-     * @param baseUrl      ecat-core-api 基础 URL
+     * @param tool            工具定义
+     * @param params          解析后的参数
+     * @param toolExecutor    HTTP 执行器（默认实现使用）
+     * @param baseUrl         ecat-core-api 基础 URL（亦作为进程内工具的 scheme/host 回退来源）
+     * @param requestHostPort MCP 请求 Host header 的 host:port，进程内工具据此拼装对 agent 可达的 URL；
+     *                        可为 null/空，进程内工具自行回退 baseUrl（默认实现 HTTP 工具忽略此参数）
      * @return 执行结果
      * @throws McpException 进程内调用工具的执行错误
      */
     public ToolResult execute(ToolDescriptor tool, Map<String, Object> params,
-                              ToolExecutor toolExecutor, String baseUrl) throws McpException {
+                              ToolExecutor toolExecutor, String baseUrl,
+                              String requestHostPort) throws McpException {
         return toolExecutor.execute(tool, params, baseUrl);
     }
 

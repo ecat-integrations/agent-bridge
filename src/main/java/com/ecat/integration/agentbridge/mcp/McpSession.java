@@ -1,23 +1,22 @@
 package com.ecat.integration.agentbridge.mcp;
 
-import com.ecat.integration.HttpServerIntegration.handler.SseConnection;
-
-import java.io.IOException;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * MCP 会话管理。
+ * MCP 会话标识。
  *
- * <p>每个 Agent 连接对应一个 McpSession 实例。维护 SSE 输出流、
- * 已加载的能力组等状态。
+ * <p>每个 Agent 连接对应一个 McpSession 实例，持有会话唯一标识 + 当前请求的 Host。
+ * 会话生命周期：handlePost 创建/获取 -> handleDelete 关闭。
  *
- * <p>v1.2 变更：移除 subscribedEventTypes（截流聚合机制不需要事件订阅过滤）。
- *
- * <p>生命周期：handlePost 创建/获取 -> handleGet 注册 SSE 输出流 -> handleDelete 关闭。
+ * <p>BCP 重构后移除了原 v1 会话累积状态（SSE 连接、agentId、
+ * loadedCapabilityGroups、executedRequests、initialized/active 标记、createdAt）——
+ * 这些字段在两工具架构下均无消费者（write-only）。当前保留：
+ * <ul>
+ *   <li>{@code id}：{@code Mcp-Session-Id} header 与 {@link McpServer} 会话 Map 的键</li>
+ *   <li>{@code requestHostPort}：当前请求 Host header 的 host:port，供进程内工具
+ *       （如 media get-download-url）拼装对 agent 可达的下载 URL。非 write-only——
+ *       有明确消费者，故保留（区别于被移除的 v1 累积状态）。每次 handlePost 刷新。</li>
+ * </ul>
  *
  * @author coffee
  */
@@ -26,26 +25,8 @@ public class McpSession {
     /** 会话唯一标识 */
     private final String id;
 
-    /** Agent 标识（由认证层设置） */
-    private volatile String agentId;
-
-    /** MCP initialize 是否已完成 */
-    private volatile boolean initialized;
-
-    /** 会话是否活跃 */
-    private volatile boolean active;
-
-    /** SSE 连接（由 SseHandler GET 回调注册） */
-    private volatile SseConnection sseConnection;
-
-    /** 已加载的能力组名称集合 */
-    private final Set<String> loadedCapabilityGroups;
-
-    /** 已执行请求的上下文存储（requestId -> context） */
-    private final ConcurrentHashMap<String, Object> executedRequests;
-
-    /** 会话创建时间戳 */
-    private final long createdAt;
+    /** 当前请求 Host header 的 host:port（每次 handlePost 刷新），供进程内工具拼装下载 URL */
+    private String requestHostPort;
 
     /**
      * 构造器 — 生成随机 UUID 作为会话 ID
@@ -61,56 +42,7 @@ public class McpSession {
      */
     public McpSession(String id) {
         this.id = id;
-        this.agentId = null;
-        this.initialized = false;
-        this.active = true;
-        this.sseConnection = null;
-        this.loadedCapabilityGroups = Collections.synchronizedSet(new HashSet<String>());
-        this.executedRequests = new ConcurrentHashMap<String, Object>();
-        this.createdAt = System.currentTimeMillis();
     }
-
-    /**
-     * 向此会话的 SSE 连接写入数据。
-     *
-     * <p>使用 SseConnection.send() 发送，Undertow 自动处理 SSE 帧格式。
-     * synchronized 保证多线程写入原子性。
-     *
-     * <p>如果会话没有 SSE 连接（sseConnection == null），静默返回不抛异常。
-     * Agent 可能只做 POST 操作不建立 GET SSE 连接，这不应被视为错误。
-     *
-     * @param sseData SSE data 内容（不含 "data: " 前缀）
-     * @throws IOException 会话不活跃或 SSE 连接已关闭时抛出
-     */
-    public synchronized void sendSseEvent(String sseData) throws IOException {
-        if (!active) {
-            throw new IOException("Session is not active: " + id);
-        }
-        SseConnection conn = sseConnection;
-        if (conn == null) {
-            // 没有 SSE 连接，静默跳过（Agent 可能只做 POST 操作）
-            return;
-        }
-        if (!conn.isOpen()) {
-            throw new IOException("SSE connection closed for session: " + id);
-        }
-        conn.send(sseData);
-    }
-
-    /**
-     * 关闭会话，释放资源。
-     *
-     * <p>设置 active=false，清空 SSE 连接引用。不主动关闭 SseConnection，
-     * 由 SseHandler 的 onClose 回调负责。
-     */
-    public void close() {
-        active = false;
-        sseConnection = null;
-        loadedCapabilityGroups.clear();
-        executedRequests.clear();
-    }
-
-    // ===== Getter / Setter =====
 
     /**
      * 获取会话 ID
@@ -122,83 +54,30 @@ public class McpSession {
     }
 
     /**
-     * 获取 Agent 标识
+     * 设置当前请求 Host header 的 host:port（由 McpServer.handlePost 从请求头提取后写入）。
      *
-     * @return Agent 标识，未认证时为 null
+     * @param requestHostPort host:port，无 Host 头时为 null（进程内工具自行回退 baseUrl）
      */
-    public String getAgentId() {
-        return agentId;
+    public void setRequestHostPort(String requestHostPort) {
+        this.requestHostPort = requestHostPort;
     }
 
     /**
-     * 设置 Agent 标识
+     * 获取当前请求 Host header 的 host:port，供进程内工具拼装下载 URL。
      *
-     * @param agentId Agent 标识
+     * @return host:port，无 Host 头时为 null
      */
-    public void setAgentId(String agentId) {
-        this.agentId = agentId;
+    public String getRequestHostPort() {
+        return requestHostPort;
     }
 
     /**
-     * 判断 MCP initialize 是否已完成
+     * 关闭会话。
      *
-     * @return true 表示已初始化
+     * <p>当前会话无可释放资源（移除 SSE 连接与累积状态后），保留方法供
+     * {@link McpServer} 生命周期统一调用，便于后续按需扩展清理逻辑。
      */
-    public boolean isInitialized() {
-        return initialized;
-    }
-
-    /**
-     * 设置 MCP initialize 完成状态
-     *
-     * @param initialized 是否已初始化
-     */
-    public void setInitialized(boolean initialized) {
-        this.initialized = initialized;
-    }
-
-    /**
-     * 判断会话是否活跃
-     *
-     * @return true 表示活跃
-     */
-    public boolean isActive() {
-        return active;
-    }
-
-    /**
-     * 注册 SSE 连接（由 SseHandler GET 回调调用）
-     *
-     * @param sseConnection SSE 连接
-     */
-    public void setSseConnection(SseConnection sseConnection) {
-        this.sseConnection = sseConnection;
-    }
-
-    /**
-     * 获取已加载的能力组名称集合
-     *
-     * @return 能力组名称集合（线程安全）
-     */
-    public Set<String> getLoadedCapabilityGroups() {
-        return loadedCapabilityGroups;
-    }
-
-    /**
-     * 获取已执行请求的上下文存储
-     *
-     * @return 请求上下文 Map（线程安全）
-     */
-    public ConcurrentHashMap<String, Object> getExecutedRequests() {
-        return executedRequests;
-    }
-
-    /**
-     * 获取会话创建时间戳
-     *
-     * @return 创建时间戳（毫秒）
-     */
-    public long getCreatedAt() {
-        return createdAt;
+    public void close() {
+        // no per-session resources to release
     }
 }

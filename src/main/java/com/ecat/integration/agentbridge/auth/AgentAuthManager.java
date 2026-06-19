@@ -8,10 +8,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -23,10 +21,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * 认证流程：
  * <ol>
  *   <li>从 Authorization header 提取 Bearer token</li>
- *   <li>回退到 query parameter {@code ?token=xxx}（SSE 场景）</li>
+ *   <li>回退到 query parameter {@code ?token=xxx}（无 header 客户端场景）</li>
  *   <li>对 token 进行 SHA-256 哈希后与存储的哈希比对</li>
  *   <li>检查 token 是否过期</li>
  * </ol>
+ *
+ * <p>注：原 role/permissions 身份模型（AgentIdentity）已移除——权限在执行路径上从不被消费，
+ * 即任何有效 token 都可调用全部工具。如需分级授权，应在 ToolDispatcher 落地真正的权限校验后再恢复身份载体。
  *
  * @author coffee
  */
@@ -37,9 +38,6 @@ public class AgentAuthManager implements McpAuthenticator {
 
     /** Token 随机部分长度（hex 字符数，32 字符 = 16 字节） */
     private static final int TOKEN_RANDOM_LENGTH = 32;
-
-    /** Token 默认有效期：24 小时（毫秒） */
-    private static final long DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000L;
 
     /** SecureRandom 实例，用于生成 token 的随机部分 */
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
@@ -55,20 +53,19 @@ public class AgentAuthManager implements McpAuthenticator {
      * <p>
      * Token 格式为 {@code ecat-agent-<32位随机hex>}，生成后以 SHA-256 哈希形式存入 tokenStore。
      *
-     * @param agentName   Agent 名称
-     * @param role        Agent 角色
-     * @param permissions 权限集合
+     * <p>永不过期：token 创建后持续有效，直至显式删除对应 ConfigEntry 或被
+     * {@link #revokeByTokenHash} 撤销。配合 ConfigFlow 持久化的 tokenHash，token 可跨重启续存。
+     *
+     * @param agentName Agent 名称（仅作生成日志/标识用途，不嵌入 token）
+     * @param role      Agent 角色（仅作元数据记录，当前不参与授权决策）
      * @return 生成的 AgentToken（包含原始 token 字符串）
      */
-    public AgentToken generateToken(String agentName, String role, Set<String> permissions) {
+    public AgentToken generateToken(String agentName, String role) {
         if (agentName == null) {
             throw new IllegalArgumentException("agentName must not be null");
         }
         if (role == null) {
             throw new IllegalArgumentException("role must not be null");
-        }
-        if (permissions == null) {
-            throw new IllegalArgumentException("permissions must not be null");
         }
 
         // 生成随机 hex 字符串
@@ -80,10 +77,8 @@ public class AgentAuthManager implements McpAuthenticator {
         }
         String token = TOKEN_PREFIX + hexBuilder.toString();
 
-        long now = System.currentTimeMillis();
-        String agentId = "agent-" + hexBuilder.toString();
-        AgentIdentity identity = new AgentIdentity(agentId, agentName, role, permissions);
-        AgentToken agentToken = new AgentToken(token, identity, now, now + DEFAULT_TOKEN_TTL_MS);
+        // 永不过期：expiresAt = Long.MAX_VALUE，配合 hash-only 持久化实现跨重启续存
+        AgentToken agentToken = new AgentToken(token, Long.MAX_VALUE);
 
         // 存储 token hash -> AgentToken
         String tokenHash = sha256(token);
@@ -93,14 +88,14 @@ public class AgentAuthManager implements McpAuthenticator {
     }
 
     /**
-     * 验证 token，返回对应的 AgentIdentity。
+     * 验证 token，返回对应的 AgentToken。
      * <p>
      * 对传入的 token 计算 SHA-256 哈希，在 tokenStore 中查找并检查是否过期。
      *
      * @param token 原始 token 字符串
-     * @return 对应的 AgentIdentity，如果 token 无效或已过期返回 null
+     * @return 对应的 AgentToken，如果 token 无效或已过期返回 null
      */
-    public AgentIdentity validateToken(String token) {
+    public AgentToken validateToken(String token) {
         if (token == null || token.isEmpty()) {
             return null;
         }
@@ -113,7 +108,7 @@ public class AgentAuthManager implements McpAuthenticator {
             tokenStore.remove(tokenHash);
             return null;
         }
-        return agentToken.getIdentity();
+        return agentToken;
     }
 
     /**
@@ -152,16 +147,21 @@ public class AgentAuthManager implements McpAuthenticator {
     }
 
     /**
-     * 从 ConfigEntry 列表加载已保存的 token 哈希。
+     * 从 ConfigEntry 列表恢复持久化的 token 到 tokenStore。
      * <p>
-     * 用于服务重启后恢复已有的 token 认证能力。
-     * 每个 ConfigEntry 的 data 中应包含 "tokenHash" 字段。
+     * 用于服务重启后恢复 token 有效性：把每个 ConfigEntry data 中的 "tokenHash" 字段作为 key，
+     * 存入一个永不过期（{@link AgentToken} token 字段为 null，{@link AgentAuthManager#validateToken}
+     * 不读取该字段，仅按 {@code sha256(传入 token)} 作 key 索引）的 AgentToken。
      * <p>
-     * 注意：从 ConfigEntry 恢复的 token 无法获取原始 token 字符串，
-     * 仅恢复身份信息用于内部引用，不会使旧的原始 token 重新有效。
-     * 调用方需要在重启后重新生成 token。
+     * <b>hash-only 恢复原理</b>：原始 rawToken 不持久化（安全考虑，不可逆），但
+     * {@link #validateToken} 本就按 {@code sha256(传入 token)} 查 tokenStore——而 entry 中的
+     * tokenHash 正是创建时 {@code sha256(rawToken)} 的值。故重启后调用方用同一个原始 token 调
+     * {@code validateToken}，计算出的 hash 命中此处恢复的 key，即可认证通过。
+     * <p>
+     * {@code putIfAbsent}：避免覆盖已在内存中（本次启动 generateToken 生成）的同 hash token。
+     * data 中无 "tokenHash" 字段（旧版 entry 或非 token entry）的条目被跳过，不抛异常。
      *
-     * @param entries ConfigEntry 列表
+     * @param entries ConfigEntry 列表，可为 null
      */
     public void loadFromEntries(List<ConfigEntry> entries) {
         if (entries == null) {
@@ -178,56 +178,11 @@ public class AgentAuthManager implements McpAuthenticator {
             }
             String tokenHash = (String) tokenHashObj;
 
-            // 从 entry 中恢复身份信息
-            String agentId = entry.getUniqueId();
-            String name = (String) data.get("name");
-            String role = (String) data.get("role");
-
-            Object permsObj = data.get("permissions");
-            Set<String> permissions = new HashSet<String>();
-            if (permsObj instanceof List) {
-                for (Object perm : (List<?>) permsObj) {
-                    if (perm != null) {
-                        permissions.add(perm.toString());
-                    }
-                }
-            }
-
-            if (agentId == null || name == null || role == null) {
-                continue;
-            }
-
-            AgentIdentity identity = new AgentIdentity(agentId, name, role, permissions);
-            // 恢复的 token 设置为已过期（原始 token 已不可用）
-            long createdAt = 0L;
-            Object createdAtObj = data.get("createdAt");
-            if (createdAtObj instanceof Number) {
-                createdAt = ((Number) createdAtObj).longValue();
-            }
-            // 创建已过期的 AgentToken 作为占位符，保持身份信息可查
-            AgentToken restoredToken = new AgentToken(null, identity, createdAt, 0L);
+            // 恢复有效（永不过期）的 AgentToken。token 字段传 null——validateToken 不读取它，
+            // 仅按 sha256(传入 token) 作 key 索引，而该 key 正是此处 put 的 tokenHash。
+            AgentToken restoredToken = new AgentToken(null, Long.MAX_VALUE);
             tokenStore.putIfAbsent(tokenHash, restoredToken);
         }
-    }
-
-    /**
-     * 通过 Token 字符串认证（用于 SSE 场景）。
-     * SSE 使用 SseConnection 而非 EasyHttpExchange，通过此方法完成认证。
-     *
-     * @param token 认证 token 字符串
-     * @return 认证后的 AgentIdentity
-     * @throws AuthException token 无效或已过期时抛出（401）
-     */
-    @Override
-    public Object authenticateByToken(String token) throws Exception {
-        if (token == null || token.isEmpty()) {
-            throw new AuthException(401, "No token provided");
-        }
-        AgentIdentity identity = validateToken(token);
-        if (identity == null) {
-            throw new AuthException(401, "Invalid or expired token");
-        }
-        return identity;
     }
 
     /**
@@ -236,17 +191,19 @@ public class AgentAuthManager implements McpAuthenticator {
      * 认证流程：
      * <ol>
      *   <li>从 Authorization header 获取 Bearer token</li>
-     *   <li>回退到 query parameter {@code ?token=xxx}（SSE 场景不能设置 header）</li>
+     *   <li>回退到 query parameter {@code ?token=xxx}（无 header 客户端场景）</li>
      *   <li>验证 token 有效性和过期时间</li>
      * </ol>
      *
+     * <p>校验通过即正常返回；失败时抛出 {@link AuthException}（401），
+     * 由 {@code McpServer} 在 handler 内捕获并写出 HTTP 错误响应（Bug #1）。
+     *
      * @param exchange HTTP 交换对象
-     * @return 认证后的 {@link AgentIdentity}
      * @throws AuthException 认证失败时抛出（401）
      * @throws Exception     其他异常
      */
     @Override
-    public Object authenticate(EasyHttpExchange exchange) throws Exception {
+    public void authenticate(EasyHttpExchange exchange) throws Exception {
         // 1. 尝试从 Authorization header 获取 token
         String token = null;
         List<String> authHeaders = exchange.getRequestHeaders().get("Authorization");
@@ -257,7 +214,7 @@ public class AgentAuthManager implements McpAuthenticator {
             }
         }
 
-        // 2. 回退到 query parameter（SSE 场景不能设置 header）
+        // 2. 回退到 query parameter（无 header 客户端场景）
         if (token == null || token.isEmpty()) {
             String query = exchange.getRequestURI().getQuery();
             if (query != null) {
@@ -274,11 +231,10 @@ public class AgentAuthManager implements McpAuthenticator {
         if (token == null || token.isEmpty()) {
             throw new AuthException(401, "No token provided");
         }
-        AgentIdentity identity = validateToken(token);
-        if (identity == null) {
+        AgentToken agentToken = validateToken(token);
+        if (agentToken == null) {
             throw new AuthException(401, "Invalid or expired token");
         }
-        return identity;
     }
 
     /**

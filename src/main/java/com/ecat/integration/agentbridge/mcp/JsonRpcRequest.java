@@ -9,15 +9,12 @@ import java.util.Map;
 /**
  * JSON-RPC 2.0 请求模型。
  *
- * <p>标准字段：jsonrpc（固定 "2.0"）、id（可为 null，通知无 id）、
+ * <p>标准字段：jsonrpc（固定 "2.0"，仅在校验时读取，不保留）、id（可为 null，通知无 id）、
  * method（String）、params（Object，可为 null）。
  *
  * @author coffee
  */
 public class JsonRpcRequest {
-
-    /** JSON-RPC 协议版本 */
-    private final String jsonrpc;
 
     /** 请求 ID，通知消息时为 null */
     private final Object id;
@@ -31,13 +28,11 @@ public class JsonRpcRequest {
     /**
      * 全参构造器
      *
-     * @param jsonrpc 协议版本
      * @param id      请求 ID
      * @param method  方法名
      * @param params  方法参数
      */
-    public JsonRpcRequest(String jsonrpc, Object id, String method, Object params) {
-        this.jsonrpc = jsonrpc;
+    public JsonRpcRequest(Object id, String method, Object params) {
         this.id = id;
         this.method = method;
         this.params = params;
@@ -45,6 +40,8 @@ public class JsonRpcRequest {
 
     /**
      * 从 JSON 字符串解析 JSON-RPC 请求。
+     *
+     * <p>解析时校验 jsonrpc 字段必须为 "2.0"，校验通过后不保留该字段（协议版本固定）。
      *
      * @param jsonBody JSON 格式的请求体
      * @return 解析后的 JsonRpcRequest
@@ -74,16 +71,7 @@ public class JsonRpcRequest {
         }
         Object id = obj.get("id");
         Object params = obj.get("params");
-        return new JsonRpcRequest(jsonrpc, id, method, params);
-    }
-
-    /**
-     * 获取协议版本
-     *
-     * @return 协议版本字符串
-     */
-    public String getJsonrpc() {
-        return jsonrpc;
+        return new JsonRpcRequest(id, method, params);
     }
 
     /**
@@ -105,15 +93,6 @@ public class JsonRpcRequest {
     }
 
     /**
-     * 获取原始参数对象
-     *
-     * @return 参数对象，可能为 null
-     */
-    public Object getParams() {
-        return params;
-    }
-
-    /**
      * 安全地将 params 转换为 Map。
      *
      * <p>如果 params 为 null 返回空 Map；如果 params 不是 Map 类型则抛出 McpException。
@@ -131,14 +110,5 @@ public class JsonRpcRequest {
         }
         throw new McpException(JsonRpcResponse.INVALID_PARAMS,
                 "params must be a JSON object, got: " + params.getClass().getSimpleName());
-    }
-
-    /**
-     * 判断此请求是否为通知（无 id 字段）。
-     *
-     * @return true 表示通知，不需要响应
-     */
-    public boolean isNotification() {
-        return id == null;
     }
 }

@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -68,7 +69,7 @@ public class McpServerAuthTest {
     @Test
     public void handlePost_authException_writes401NotHang() throws Exception {
         McpAuthenticator authenticator = mock(McpAuthenticator.class);
-        when(authenticator.authenticate(any())).thenThrow(new AuthException(401, "No token provided"));
+        doThrow(new AuthException(401, "No token provided")).when(authenticator).authenticate(any());
 
         McpRequestHandler handler = mock(McpRequestHandler.class);
         EasyHttpServer server = mock(EasyHttpServer.class);
@@ -93,7 +94,7 @@ public class McpServerAuthTest {
     @Test
     public void handleDelete_authException_writes401NotHang() throws Exception {
         McpAuthenticator authenticator = mock(McpAuthenticator.class);
-        when(authenticator.authenticate(any())).thenThrow(new AuthException(401, "No token provided"));
+        doThrow(new AuthException(401, "No token provided")).when(authenticator).authenticate(any());
 
         McpRequestHandler handler = mock(McpRequestHandler.class);
         EasyHttpServer server = mock(EasyHttpServer.class);
@@ -117,7 +118,7 @@ public class McpServerAuthTest {
     @Test
     public void handlePost_usesStatusCodeFromAuthException() throws Exception {
         McpAuthenticator authenticator = mock(McpAuthenticator.class);
-        when(authenticator.authenticate(any())).thenThrow(new AuthException(401, "Invalid or expired token"));
+        doThrow(new AuthException(401, "Invalid or expired token")).when(authenticator).authenticate(any());
 
         McpRequestHandler handler = mock(McpRequestHandler.class);
         EasyHttpServer server = mock(EasyHttpServer.class);

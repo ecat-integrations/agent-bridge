@@ -2,7 +2,6 @@ package com.ecat.integration.agentbridge.subagent.impl;
 
 import com.ecat.integration.agentbridge.subagent.AbstractSubAgent;
 import com.ecat.integration.agentbridge.subagent.ArgDescriptor;
-import com.ecat.integration.agentbridge.subagent.SafetyLevel;
 import com.ecat.integration.agentbridge.subagent.ToolDescriptor;
 
 import java.util.Arrays;
@@ -42,7 +41,6 @@ public class LogicDeviceSubAgent extends AbstractSubAgent {
                 .usage("logic-device list")
                 .examples(Arrays.asList("logic-device list"))
                 .httpMethod("GET").httpPath("/core-api/logic-devices")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -56,7 +54,6 @@ public class LogicDeviceSubAgent extends AbstractSubAgent {
                                 .description("逻辑设备唯一标识符，可通过 logic-device list 获取").build()))
                 .examples(Arrays.asList("logic-device get-attributes --id station-01"))
                 .httpMethod("GET").httpPath("/core-api/logic-devices/{id}/attributes")
-                .safetyLevel(SafetyLevel.SAFE)
                 .build();
     }
 
@@ -79,7 +76,7 @@ public class LogicDeviceSubAgent extends AbstractSubAgent {
                 .examples(Arrays.asList(
                         "logic-device set-attribute --id station-01 --attr-id threshold --value 50 --unit \"ppb\""))
                 .httpMethod("PUT").httpPath("/core-api/logic-devices/{id}/attributes/{attrId}/value")
-                .safetyLevel(SafetyLevel.MODERATE).async()
+                .async()
                 .build();
     }
 }

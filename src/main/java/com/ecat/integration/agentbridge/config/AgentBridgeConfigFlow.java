@@ -197,8 +197,13 @@ public class AgentBridgeConfigFlow extends AbstractConfigFlow {
         }
 
         // 用户点击确认 — 创建 ConfigEntry
-        // 从 entryData 中移除临时字段 _rawToken，不持久化
+        // 从 entryData 中移除临时字段 _rawToken（原始 token 不落盘，安全考虑）
         String rawToken = (String) context.getEntryData().remove("_rawToken");
+
+        // 持久化 tokenHash（SHA-256，不可逆）→ 重启后 AgentAuthManager.loadFromEntries 据此恢复
+        // 有效 token。hash-only：不落 rawToken 明文，仅落其 sha256 hash。validateToken 按
+        // sha256(传入 token) 作 key 索引，故 rawToken 无需持久化即可跨重启认证。
+        context.getEntryData().put("tokenHash", tokenManager.hashToken(rawToken));
 
         ConfigFlowResult result = createEntry();
         // 将 rawToken 附加到返回结果中，供前端展示
@@ -283,5 +288,16 @@ public class AgentBridgeConfigFlow extends AbstractConfigFlow {
          * @return 生成的原始 token 字符串
          */
         String generateToken(String name, String role);
+
+        /**
+         * 计算原始 token 的 SHA-256 哈希（用于持久化到 ConfigEntry 的 tokenHash 字段）。
+         * <p>
+         * 通过回调而非在 ConfigFlow 直接依赖 auth/ 包的 SHA-256 工具，保持 ConfigFlow 与
+         * auth/ 包的解耦（见类级 javadoc）。实现通常委托给 {@code AgentAuthManager.sha256}。
+         *
+         * @param rawToken 原始 token 字符串
+         * @return SHA-256 hex 字符串
+         */
+        String hashToken(String rawToken);
     }
 }

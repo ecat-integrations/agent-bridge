@@ -1,7 +1,6 @@
 package com.ecat.integration.agentbridge.subagent.impl;
 
 import com.ecat.integration.agentbridge.subagent.ArgDescriptor;
-import com.ecat.integration.agentbridge.subagent.SafetyLevel;
 import com.ecat.integration.agentbridge.subagent.ToolDescriptor;
 import org.junit.Test;
 
@@ -43,7 +42,6 @@ public class DeviceSubAgentTest {
         ToolDescriptor list = findTool("list");
         assertEquals("GET", list.getHttpMethod());
         assertEquals("/core-api/devices", list.getHttpPath());
-        assertEquals(SafetyLevel.SAFE, list.getSafetyLevel());
     }
 
     @Test
@@ -69,7 +67,6 @@ public class DeviceSubAgentTest {
         assertEquals("PUT", setAttr.getHttpMethod());
         assertEquals("/core-api/devices/{id}/attributes/{attrId}/value", setAttr.getHttpPath());
         assertTrue("set-attribute 应为异步", setAttr.isAsync());
-        assertEquals(SafetyLevel.MODERATE, setAttr.getSafetyLevel());
 
         ArgDescriptor idArg = findArg(setAttr, "id");
         assertTrue("id 应为路径参数", idArg.isPathParam());

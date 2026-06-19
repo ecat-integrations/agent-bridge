@@ -42,15 +42,6 @@ public class McpException extends Exception {
     }
 
     /**
-     * 获取 JSON-RPC 错误码
-     *
-     * @return 错误码
-     */
-    public int getErrorCode() {
-        return errorCode;
-    }
-
-    /**
      * 获取错误消息
      *
      * @return 错误消息

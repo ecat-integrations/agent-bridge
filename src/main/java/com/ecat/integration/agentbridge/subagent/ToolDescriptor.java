@@ -8,7 +8,7 @@ import java.util.List;
  *
  * <p>不可变值对象，由两部分组成：
  * <ul>
- *   <li>CLI 元数据：toolName / description / usage / args / examples / safetyLevel，
+ *   <li>CLI 元数据：toolName / description / usage / args / examples，
  *       用于 getTools 返回给 Agent（CLI-first 格式，doc 05 §7.1）</li>
  *   <li>HTTP 映射：httpMethod / httpPath / async，供 ToolExecutor 执行（进程内调用的工具可不设）</li>
  * </ul>
@@ -25,7 +25,6 @@ public class ToolDescriptor {
     private final String usage;
     private final List<ArgDescriptor> args;
     private final List<String> examples;
-    private final SafetyLevel safetyLevel;
     private final String httpMethod;
     private final String httpPath;
     private final boolean async;
@@ -36,7 +35,6 @@ public class ToolDescriptor {
         this.usage = b.usage;
         this.args = b.args;
         this.examples = b.examples;
-        this.safetyLevel = b.safetyLevel;
         this.httpMethod = b.httpMethod;
         this.httpPath = b.httpPath;
         this.async = b.async;
@@ -57,9 +55,6 @@ public class ToolDescriptor {
     /** 获取示例列表 */
     public List<String> getExamples() { return examples; }
 
-    /** 获取安全级别 */
-    public SafetyLevel getSafetyLevel() { return safetyLevel; }
-
     /** 获取 HTTP 方法（GET/POST/...），进程内调用工具返回 null */
     public String getHttpMethod() { return httpMethod; }
 
@@ -76,7 +71,6 @@ public class ToolDescriptor {
      * new ToolDescriptor.Builder("set-attribute")
      *     .description("设置设备属性值")
      *     .httpMethod("PUT").httpPath("/devices/{deviceId}/attributes/{attrId}/value").async()
-     *     .safetyLevel(SafetyLevel.MODERATE)
      *     .args(Arrays.asList(
      *         new ArgDescriptor.Builder("deviceId").pathParam().required().build(),
      *         new ArgDescriptor.Builder("attrId").pathParam().required().build(),
@@ -90,7 +84,6 @@ public class ToolDescriptor {
         private String usage;
         private List<ArgDescriptor> args = Collections.emptyList();
         private List<String> examples = Collections.emptyList();
-        private SafetyLevel safetyLevel = SafetyLevel.SAFE;
         private String httpMethod;
         private String httpPath;
         private boolean async;
@@ -111,10 +104,6 @@ public class ToolDescriptor {
         }
         public Builder examples(List<String> examples) {
             this.examples = (examples == null) ? Collections.<String>emptyList() : examples;
-            return this;
-        }
-        public Builder safetyLevel(SafetyLevel safetyLevel) {
-            if (safetyLevel != null) { this.safetyLevel = safetyLevel; }
             return this;
         }
         public Builder httpMethod(String httpMethod) { this.httpMethod = httpMethod; return this; }
