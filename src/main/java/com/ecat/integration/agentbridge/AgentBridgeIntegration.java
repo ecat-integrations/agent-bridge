@@ -17,9 +17,10 @@
 package com.ecat.integration.agentbridge;
 
 import com.ecat.core.Bus.BusTopic;
-import com.ecat.core.Bus.IntegrationLifecycleEvent;
+import com.ecat.core.Bus.event.IntegrationLifecycleEvent;
 import com.ecat.core.Bus.EventSubscriber;
 import com.ecat.core.Bus.Subscription;
+import com.ecat.core.Bus.event.BusEvent;
 import com.ecat.core.ConfigEntry.ConfigEntry;
 import com.ecat.core.ConfigFlow.AbstractConfigFlow;
 import com.ecat.core.EcatCore;
@@ -242,11 +243,12 @@ public class AgentBridgeIntegration extends IntegrationBase {
                 BusTopic.INTEGRATION_LIFECYCLE.getTopicName(),
                 new EventSubscriber() {
                     @Override
-                    public void handleEvent(String topic, Object data) {
-                        if (!(data instanceof IntegrationLifecycleEvent)) {
+                    public void handleEvent(BusEvent<?> event) {
+                        Object payload = event.getPayload();
+                        if (!(payload instanceof IntegrationLifecycleEvent)) {
                             return;
                         }
-                        IntegrationLifecycleEvent evt = (IntegrationLifecycleEvent) data;
+                        IntegrationLifecycleEvent evt = (IntegrationLifecycleEvent) payload;
                         if (evt.getEffect() != IntegrationLifecycleEvent.Effect.ACTIVE) {
                             return;
                         }
@@ -472,7 +474,7 @@ public class AgentBridgeIntegration extends IntegrationBase {
                 BusTopic.INTEGRATIONS_ALL_LOADED.getTopicName(),
                 new EventSubscriber() {
                     @Override
-                    public void handleEvent(String topic, Object eventData) {
+                    public void handleEvent(BusEvent<?> event) {
                         // 全量对账 SubAgent 索引：解决启动时序竞争，确保所有已加载依赖集成的
                         // SubAgent（如依赖 media-api 的 media agent）被注册（Bug #3）。
                         reconcileSubAgentsFromRegistry();
