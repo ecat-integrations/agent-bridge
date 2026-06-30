@@ -4,30 +4,30 @@
   <parent>
     <groupId>com.ecat</groupId>
     <artifactId>ecat-project</artifactId>
-    <version>1.0.0</version>
+    <version>3.0.0</version>
     <relativePath>../../ecat-project/pom.xml</relativePath>
   </parent>
   <artifactId>integration-agent-bridge</artifactId>
-  <version>2.0.0</version>
+  <version>3.0.0</version>
   <name>integration-agent-bridge</name>
   <description>Agent Bridge MCP Server - 允许外部 AI Agent 通过 MCP 协议与 ECAT 设备交互</description>
   <dependencies>
     <dependency>
       <groupId>com.ecat</groupId>
       <artifactId>ecat-core</artifactId>
-      <version>2.0.0</version>
+      <version>3.0.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.ecat</groupId>
       <artifactId>integration-httpserver</artifactId>
-      <version>2.0.0</version>
+      <version>3.0.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.ecat</groupId>
       <artifactId>integration-ecat-core-api</artifactId>
-      <version>2.0.0</version>
+      <version>3.0.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
