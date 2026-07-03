@@ -22,14 +22,17 @@ import com.ecat.core.Bus.EventSubscriber;
 import com.ecat.core.Bus.Subscription;
 import com.ecat.core.Bus.event.BusEvent;
 import com.ecat.core.ConfigEntry.ConfigEntry;
+import com.ecat.core.ConfigEntry.SourceType;
 import com.ecat.core.ConfigFlow.AbstractConfigFlow;
 import com.ecat.core.EcatCore;
 import com.ecat.core.Integration.IntegrationBase;
 import com.ecat.core.Integration.IntegrationLoadOption;
+import com.ecat.core.Utils.DateTimeUtils;
 import com.ecat.integration.EcatCoreApiIntegration.EcatCoreApiIntegration;
 import com.ecat.integration.HttpServerIntegration.EasyHttpServer;
 import com.ecat.integration.HttpServerIntegration.HttpServerIntegration;
 import com.ecat.integration.agentbridge.auth.AgentAuthManager;
+import com.ecat.integration.agentbridge.auth.AgentToken;
 import com.ecat.integration.agentbridge.subagent.CliParser;
 import com.ecat.integration.agentbridge.subagent.SubAgentRegistry;
 import com.ecat.integration.agentbridge.subagent.ToolDispatcher;
@@ -50,6 +53,7 @@ import com.ecat.integration.agentbridge.tool.MediaUrlSigner;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +93,21 @@ public class AgentBridgeIntegration extends IntegrationBase {
 
     /** MCP endpoint 路径 */
     private static final String MCP_ENDPOINT = "/mcp";
+
+    /**
+     * 托管 token entry 的 uniqueId 前缀。
+     * <p>区别于 ConfigFlow 向导创建的 token entry（UNIQUE_ID_PREFIX + name），
+     * 托管 token 由集成代码（如 llm-agent）以编程方式调用 {@link #issueManagedToken} 签发，
+     * 其 uniqueId 形如 {@code <token 前缀>managed-<owner>-<hash前8位>}，确保唯一且可识别来源。
+     */
+    private static final String MANAGED_UNIQUE_ID_PREFIX =
+            AgentBridgeConfigFlow.UNIQUE_ID_PREFIX + "managed-";
+
+    /**
+     * 本集成自身的 coordinate，用于在托管 token API 中写入/查询 entry 的 coordinate 字段。
+     * <p>基类 {@link IntegrationBase} 未暴露 getCoordinate() 访问器，故提升为类常量避免硬编码重复。
+     */
+    private static final String OWN_COORDINATE = "com.ecat:integration-agent-bridge";
 
     /** HttpServerIntegration 池化引用 */
     private HttpServerIntegration httpServerPool;
@@ -453,6 +472,112 @@ public class AgentBridgeIntegration extends IntegrationBase {
         }
         authManager.revokeByTokenHash((String) tokenHashObj);
         log.info("Agent token revoked and entry removed: {}", uniqueId);
+    }
+
+    // ==================== 托管 Token API（供集成代码以编程方式签发/撤销）====================
+
+    /**
+     * 签发托管 Agent token，并在 ConfigEntryRegistry 中创建归属本集成的 entry。
+     *
+     * <p>使用场景：集成代码（如 {@code integration-llm-agent}）无 ConfigFlow 向导，
+     * 需以编程方式获取一个绑定到自身的 Agent token，用于访问 agent-bridge 暴露的 MCP 工具。
+     * 与 ConfigFlow 向导创建的 token（source=USER）区分，托管 token entry 的 data.source 标记为
+     * {@code "MANAGED"}，uniqueId 以 {@code <token 前缀>managed-} 开头，便于审计与回收。
+     *
+     * <p>安全语义与向导 token 一致：
+     * <ul>
+     *   <li>原始 token 仅在此返回值中出现一次（{@link AgentToken#getToken()}），不落盘</li>
+     *   <li>持久化的是 SHA-256 tokenHash，重启后由 {@link AgentAuthManager#loadFromEntries} 恢复有效 token</li>
+     *   <li>永不过期（{@code expiresAt = Long.MAX_VALUE}），只能通过 {@link #revokeManagedToken}
+     *       或删除对应 entry 显式撤销</li>
+     * </ul>
+     *
+     * @param owner 调用方集成 coordinate（如 {@code "com.ecat:integration-llm-agent"}），不能为空。
+     *              写入 entry.data.owner 用于审计追溯。
+     * @param role  Agent 角色元数据（如 {@code "hermes"}），不能为空。当前不参与授权决策，
+     *              仅作 entry.data.role 记录。
+     * @return 包含原始 token 字符串的 AgentToken
+     * @throws IllegalStateException    如果集成未完成 onLoad（core 或 authManager 未注入）
+     * @throws IllegalArgumentException 如果 owner 或 role 为空
+     */
+    public AgentToken issueManagedToken(String owner, String role) {
+        if (core == null || authManager == null) {
+            // 半初始化防护：core/authManager 未就绪时签发会写出无主 entry（无法回收、无法认证），抛异常明确告知
+            throw new IllegalStateException(
+                    "agent-bridge not fully loaded (core/authManager not injected)");
+        }
+        if (owner == null || owner.trim().isEmpty()) {
+            throw new IllegalArgumentException("owner must not be empty");
+        }
+        if (role == null || role.trim().isEmpty()) {
+            throw new IllegalArgumentException("role must not be empty");
+        }
+
+        AgentToken agentToken = authManager.generateToken(owner, role);
+        String rawToken = agentToken.getToken();
+        String tokenHash = AgentAuthManager.sha256(rawToken);
+
+        // entry.data 字段对齐 ConfigFlow 向导创建的 token entry（name/role/generatedAt/tokenHash），
+        // 并额外记录 owner 与 source=MANAGED 以区分托管来源
+        Map<String, Object> data = new HashMap<String, Object>();
+        data.put("name", owner);
+        data.put("role", role);
+        data.put("generatedAt", DateTimeUtils.now().toString());
+        data.put("tokenHash", tokenHash);
+        data.put("owner", owner);
+        data.put("source", TokenEntrySource.MANAGED.name());
+
+        // uniqueId 拼接 owner 与 tokenHash 前 8 位，避免同 owner 多次签发冲突（hash 提供唯一性）
+        String uniqueId = MANAGED_UNIQUE_ID_PREFIX + owner + "-" + tokenHash.substring(0, 8);
+
+        ConfigEntry entry = new ConfigEntry();
+        entry.setCoordinate(OWN_COORDINATE);
+        entry.setUniqueId(uniqueId);
+        entry.setTitle("Managed Token: " + owner);
+        entry.setData(data);
+        entry.setEnabled(true);
+        entry.setSource(SourceType.USER);
+
+        core.getEntryRegistry().createEntry(entry);
+        log.info("Managed token issued for owner={}, hash={}", owner, tokenHash);
+        return agentToken;
+    }
+
+    /**
+     * 按 token hash 撤销托管 token：从内存 tokenStore 移除（立即失效），并删除对应的 ConfigEntry。
+     *
+     * <p>查找规则：在 agent-bridge 集成的所有 entry 中匹配 data.tokenHash 字段。
+     * 匹配到第一个即删除并返回（tokenHash 全局唯一，最多一个匹配）。
+     *
+     * <p>幂等性：tokenHash 不存在或对应 entry 已删除时仅记录 warn 日志，不抛异常。
+     *
+     * @param tokenHash 要撤销的 token 的 SHA-256 hash
+     */
+    public void revokeManagedToken(String tokenHash) {
+        if (core == null || authManager == null) {
+            // 集成已 release（如停服过程）：无内存 token 与 entry 可清理，幂等跳过
+            log.warn("revokeManagedToken skipped (integration not fully loaded): hash={}", tokenHash);
+            return;
+        }
+        if (tokenHash == null || tokenHash.isEmpty()) {
+            return;
+        }
+        // 显式撤销（健壮性：不依赖 removeEntry 回调的存在）。随后 registry.removeEntry 会触发
+        // 本类 removeEntry 回调再次 revokeByTokenHash（ConcurrentHashMap.remove 幂等，安全），
+        // 故托管 token 撤销会产生两条 info 日志（本方法 + 回调），属预期。
+        authManager.revokeByTokenHash(tokenHash);
+
+        List<ConfigEntry> entries = core.getEntryRegistry()
+                .listByCoordinate(OWN_COORDINATE);
+        for (ConfigEntry e : entries) {
+            Map<String, Object> d = e.getData();
+            if (d != null && tokenHash.equals(d.get("tokenHash"))) {
+                core.getEntryRegistry().removeEntry(e.getEntryId());
+                log.info("Managed token entry removed: {}", e.getUniqueId());
+                return;
+            }
+        }
+        log.warn("Managed token entry not found for hash: {}", tokenHash);
     }
 
     // ==================== INTEGRATIONS_ALL_LOADED 回调 ====================
