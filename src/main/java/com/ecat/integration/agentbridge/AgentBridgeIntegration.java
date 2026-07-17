@@ -58,6 +58,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Agent Bridge 主集成类，组装所有子组件。
@@ -97,8 +98,9 @@ public class AgentBridgeIntegration extends IntegrationBase {
     /**
      * 托管 token entry 的 uniqueId 前缀。
      * <p>区别于 ConfigFlow 向导创建的 token entry（UNIQUE_ID_PREFIX + name），
-     * 托管 token 由集成代码（如 llm-agent）以编程方式调用 {@link #issueManagedToken} 签发，
-     * 其 uniqueId 形如 {@code <token 前缀>managed-<owner>-<hash前8位>}，确保唯一且可识别来源。
+     * 托管 token 由集成代码（如 llm-agent）以编程方式调用 {@link #issueManagedToken} 签发。
+     * <p>新签发 entry 的 uniqueId = 本前缀 + owner（确定性，无 hash 后缀），使 registry 的 uniqueId
+     * 约束成为"一 owner 一 entry"的二道物理防线；唯一性主责在 issueManagedToken 的 owner-scan。
      */
     private static final String MANAGED_UNIQUE_ID_PREFIX =
             AgentBridgeConfigFlow.UNIQUE_ID_PREFIX + "managed-";
@@ -117,6 +119,9 @@ public class AgentBridgeIntegration extends IntegrationBase {
 
     /** Agent 认证管理器 */
     private AgentAuthManager authManager;
+
+    /** 托管 token upsert 的 per-owner 锁：串行同 owner 的 scan+mutate 临界区，防并发双发。 */
+    private final ConcurrentHashMap<String, Object> ownerLocks = new ConcurrentHashMap<>();
 
     /** MCP 服务器（HTTP 路由注册 + 会话管理） */
     private McpServer mcpServer;
@@ -477,12 +482,25 @@ public class AgentBridgeIntegration extends IntegrationBase {
     // ==================== 托管 Token API（供集成代码以编程方式签发/撤销）====================
 
     /**
-     * 签发托管 Agent token，并在 ConfigEntryRegistry 中创建归属本集成的 entry。
+     * 签发托管 Agent token，保证每个 owner 恰好一条 managed token entry（upsert 语义）。
      *
      * <p>使用场景：集成代码（如 {@code integration-llm-agent}）无 ConfigFlow 向导，
      * 需以编程方式获取一个绑定到自身的 Agent token，用于访问 agent-bridge 暴露的 MCP 工具。
      * 与 ConfigFlow 向导创建的 token（source=USER）区分，托管 token entry 的 data.source 标记为
-     * {@code "MANAGED"}，uniqueId 以 {@code <token 前缀>managed-} 开头，便于审计与回收。
+     * {@code "MANAGED"}。
+     *
+     * <p><b>唯一性责任归属（本方法为唯一收口）</b>：
+     * <ul>
+     *   <li><b>本方法 / agent-bridge（主责）</b>：按 owner 查现有 managed entry，命中则 updateEntry 轮换、
+     *       未命中才 createEntry。与调用方调用几次无关，保证每 owner ≤ 1 条。</li>
+     *   <li><b>调用方如 llm-agent（零责）</b>：只表达"何时要/何时撤"，不判重、不扫 entry、不自行轮换。</li>
+     *   <li><b>registry（二道物理防线）</b>：managed uniqueId 确定性派生自 owner（无 hash 后缀），
+     *       两次同 owner create 撞 DuplicateUniqueIdException。registry 只懂 uniqueId 不懂 owner，故非主责。</li>
+     * </ul>
+     *
+     * <p><b>upsert 用 owner-scan 而非 getByUniqueId</b>：唯一性业务键是 owner（逻辑键），非 uniqueId。
+     * 磁盘上若残留旧 hash-后缀 entry（其 uniqueId ≠ 新确定性 uniqueId），getByUniqueId 查不到会误判"没有"
+     * 而 createEntry 又生第二条 = 重新泄漏；owner-scan 对"残留旧格式/新格式/无 entry"三种状态都鲁棒。
      *
      * <p>安全语义与向导 token 一致：
      * <ul>
@@ -491,6 +509,8 @@ public class AgentBridgeIntegration extends IntegrationBase {
      *   <li>永不过期（{@code expiresAt = Long.MAX_VALUE}），只能通过 {@link #revokeManagedToken}
      *       或删除对应 entry 显式撤销</li>
      * </ul>
+     *
+     * <p>并发：per-owner 锁串行 scan+mutate 临界区，防 reconfigure/enable 并发同 owner 双发。
      *
      * @param owner 调用方集成 coordinate（如 {@code "com.ecat:integration-llm-agent"}），不能为空。
      *              写入 entry.data.owner 用于审计追溯。
@@ -513,34 +533,76 @@ public class AgentBridgeIntegration extends IntegrationBase {
             throw new IllegalArgumentException("role must not be empty");
         }
 
-        AgentToken agentToken = authManager.generateToken(owner, role);
-        String rawToken = agentToken.getToken();
-        String tokenHash = AgentAuthManager.sha256(rawToken);
+        // per-owner 锁：串行同 owner 的 scan+mutate，防 reconfigure/enable 并发双发
+        Object lock = ownerLocks.computeIfAbsent(owner, k -> new Object());
+        synchronized (lock) {
+            // upsert：按 owner 查现有 managed entry（兼容旧 hash-后缀与新确定性 uniqueId 两种格式）
+            ConfigEntry existing = findManagedEntryByOwner(owner);
 
-        // entry.data 字段对齐 ConfigFlow 向导创建的 token entry（name/role/generatedAt/tokenHash），
-        // 并额外记录 owner 与 source=MANAGED 以区分托管来源
-        Map<String, Object> data = new HashMap<String, Object>();
-        data.put("name", owner);
-        data.put("role", role);
-        data.put("generatedAt", DateTimeUtils.now().toString());
-        data.put("tokenHash", tokenHash);
-        data.put("owner", owner);
-        data.put("source", TokenEntrySource.MANAGED.name());
+            AgentToken agentToken = authManager.generateToken(owner, role);
+            String rawToken = agentToken.getToken();
+            String tokenHash = AgentAuthManager.sha256(rawToken);
 
-        // uniqueId 拼接 owner 与 tokenHash 前 8 位，避免同 owner 多次签发冲突（hash 提供唯一性）
-        String uniqueId = MANAGED_UNIQUE_ID_PREFIX + owner + "-" + tokenHash.substring(0, 8);
+            // entry.data 字段对齐 ConfigFlow 向导创建的 token entry（name/role/generatedAt/tokenHash），
+            // 并额外记录 owner 与 source=MANAGED 以区分托管来源
+            Map<String, Object> data = new HashMap<String, Object>();
+            data.put("name", owner);
+            data.put("role", role);
+            data.put("generatedAt", DateTimeUtils.now().toString());
+            data.put("tokenHash", tokenHash);
+            data.put("owner", owner);
+            data.put("source", TokenEntrySource.MANAGED.name());
 
-        ConfigEntry entry = new ConfigEntry();
-        entry.setCoordinate(OWN_COORDINATE);
-        entry.setUniqueId(uniqueId);
-        entry.setTitle("Managed Token: " + owner);
-        entry.setData(data);
-        entry.setEnabled(true);
-        entry.setSource(SourceType.USER);
+            if (existing != null) {
+                // 命中：轮换——撤旧 token + updateEntry 换 tokenHash（保 entryId/uniqueId）
+                Object oldHashObj = existing.getData() != null ? existing.getData().get("tokenHash") : null;
+                if (oldHashObj instanceof String) {
+                    authManager.revokeByTokenHash((String) oldHashObj);
+                }
+                ConfigEntry update = new ConfigEntry();
+                update.setData(data);
+                // withUpdate 无条件覆盖 enabled，须显式 true，防把 live entry 改成 disabled
+                update.setEnabled(true);
+                core.getEntryRegistry().updateEntry(existing.getEntryId(), update);
+                log.info("Managed token rotated for owner={}, entry={}, newHash={}",
+                        owner, existing.getEntryId(), tokenHash);
+            } else {
+                // 未命中：createEntry，确定性 uniqueId（无 hash 后缀）使 registry 二道防线生效
+                String uniqueId = MANAGED_UNIQUE_ID_PREFIX + owner;
+                ConfigEntry entry = new ConfigEntry();
+                entry.setCoordinate(OWN_COORDINATE);
+                entry.setUniqueId(uniqueId);
+                entry.setTitle("Managed Token: " + owner);
+                entry.setData(data);
+                entry.setEnabled(true);
+                entry.setSource(SourceType.USER);
+                core.getEntryRegistry().createEntry(entry);
+                log.info("Managed token issued for owner={}, hash={}", owner, tokenHash);
+            }
+            return agentToken;
+        }
+    }
 
-        core.getEntryRegistry().createEntry(entry);
-        log.info("Managed token issued for owner={}, hash={}", owner, tokenHash);
-        return agentToken;
+    /**
+     * 在本集成 entry 中按 owner 查 managed token entry（data.source==MANAGED && data.owner==owner）。
+     *
+     * <p>owner 是托管 token 唯一性的业务键，故按 owner 而非 uniqueId 查（兼容旧 hash-后缀 entry）。
+     * 返回第一个匹配项，无则 null。
+     */
+    private ConfigEntry findManagedEntryByOwner(String owner) {
+        List<ConfigEntry> entries = core.getEntryRegistry().listByCoordinate(OWN_COORDINATE);
+        for (ConfigEntry e : entries) {
+            Map<String, Object> d = e.getData();
+            if (d == null) {
+                continue;
+            }
+            Object src = d.get("source");
+            Object own = d.get("owner");
+            if (TokenEntrySource.MANAGED.name().equals(src) && owner.equals(own)) {
+                return e;
+            }
+        }
+        return null;
     }
 
     /**
