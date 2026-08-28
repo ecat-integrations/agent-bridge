@@ -352,7 +352,7 @@ public class AgentBridgeIntegration extends IntegrationBase {
      * <p>停止 MCP 服务器并取消事件订阅。
      */
     @Override
-    public void onRelease() {
+    protected void onReleaseImpl() {
         if (mcpServer != null) {
             mcpServer.stop();
             mcpServer = null;
