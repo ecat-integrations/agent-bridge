@@ -31,6 +31,9 @@ public class McpServer {
     private final String endpoint;
     private final McpRequestHandler requestHandler;
 
+    /** MCP 命令服务端有界等待（工具链内层 HTTP 往返可达分钟级；对齐内层 ToolExecutor 60s 读超×3 重试的量级） */
+    private static final long MCP_COMMAND_TIMEOUT_MS = 300_000L;
+
     /** 活跃会话：sessionId -> McpSession */
     private final ConcurrentHashMap<String, McpSession> sessions = new ConcurrentHashMap<String, McpSession>();
 
@@ -75,12 +78,13 @@ public class McpServer {
         if (running) {
             return;
         }
+        // MCP 命令可达分钟级（工具内层 HTTP 往返）——服务端有界等待，超时回 504（框架共性契约）
         httpServer.registerUrl(endpoint, "POST", EasyHttpServer.blocking(new EasyHttpHandler() {
             @Override
             public void handle(EasyHttpExchange exchange) throws Exception {
                 handlePost(exchange);
             }
-        }));
+        }, MCP_COMMAND_TIMEOUT_MS));
         httpServer.registerUrl(endpoint, "DELETE", EasyHttpServer.blocking(new EasyHttpHandler() {
             @Override
             public void handle(EasyHttpExchange exchange) throws Exception {
