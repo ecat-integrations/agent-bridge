@@ -1,6 +1,5 @@
 package com.ecat.integration.agentbridge;
 
-import com.ecat.core.EcatCore;
 import com.ecat.core.Integration.IntegrationRegistry;
 import com.ecat.integration.EcatCoreApiIntegration.Auth.AuthManager;
 import com.ecat.integration.agentbridge.subagent.AbstractSubAgent;
@@ -15,7 +14,6 @@ import org.junit.Test;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.Set;
 
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
