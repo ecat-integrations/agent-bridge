@@ -10,7 +10,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * {@link LogicDeviceSubAgent} 单元测试。验证 3 工具映射 LogicDeviceController 实际端点。
+ * {@link LogicDeviceSubAgent} 单元测试。验证 3 工具映射 logicdevice-api 插件
+ * LogicDeviceApiController 的插件模式端点（basePath 真相源：LogicdeviceApiIntegration:81）。
  *
  * @author coffee
  */
@@ -33,10 +34,18 @@ public class LogicDeviceSubAgentTest {
     }
 
     @Test
+    public void listUsesPluginBasePath() {
+        ToolDescriptor list = findTool("list");
+        assertEquals("GET", list.getHttpMethod());
+        assertEquals("/plugins/com.ecat/integration-logicdevice-api/logic-devices", list.getHttpPath());
+    }
+
+    @Test
     public void setAttributeMapsToAsyncPutEndpoint() {
         ToolDescriptor setAttr = findTool("set-attribute");
         assertEquals("PUT", setAttr.getHttpMethod());
-        assertEquals("/core-api/logic-devices/{id}/attributes/{attrId}/value", setAttr.getHttpPath());
+        assertEquals("/plugins/com.ecat/integration-logicdevice-api/logic-devices"
+                + "/{id}/attributes/{attrId}/value", setAttr.getHttpPath());
         assertTrue("set-attribute 应为异步", setAttr.isAsync());
         assertTrue("id 应为路径参数", findArg(setAttr, "id").isPathParam());
         assertTrue("attrId 应为路径参数", findArg(setAttr, "attrId").isPathParam());
@@ -47,7 +56,8 @@ public class LogicDeviceSubAgentTest {
     public void getAttributesUsesAttributesPath() {
         ToolDescriptor getAttr = findTool("get-attributes");
         assertEquals("GET", getAttr.getHttpMethod());
-        assertEquals("/core-api/logic-devices/{id}/attributes", getAttr.getHttpPath());
+        assertEquals("/plugins/com.ecat/integration-logicdevice-api/logic-devices"
+                + "/{id}/attributes", getAttr.getHttpPath());
     }
 
     private ToolDescriptor findTool(String name) {
